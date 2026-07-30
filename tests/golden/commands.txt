@@ -4,6 +4,6 @@ hf jobs run --flavor a10g-small --secrets HF_TOKEN \
 curl -LsSf https://astral.sh/uv/install.sh | sh > /dev/null 2>&1
 export PATH="$HOME/.local/bin:$PATH"
 uv venv /tmp/venv --python 3.12 > /dev/null
-uv pip install -q --python /tmp/venv/bin/python "saturate[hf]>=0.1.1"
+uv pip install -q --python /tmp/venv/bin/python "saturate[hf]>=0.1.2"
 curl -sL -H "Authorization: Bearer $HF_TOKEN" https://huggingface.co/datasets/davanstrien/jobpipe-staging/resolve/main/embed_fineweb-edu.py -o /tmp/run.py
 /tmp/venv/bin/python /tmp/run.py --rank 0 --world 1'

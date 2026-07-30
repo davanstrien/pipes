@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["saturate[hf]>=0.1.1"]
+# dependencies = ["saturate[hf]>=0.1.2"]
 #
 # [tool.hf-jobs]
 # flavor = "a10g-small"

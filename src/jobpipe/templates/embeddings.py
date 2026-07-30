@@ -35,7 +35,7 @@ import re
 from jobpipe.spec import TaskSpec
 
 # [hf] extra = huggingface_hub (hf:// output) + datasets (dataset_rows)
-SATURATE_PIN = "saturate[hf]>=0.1.1"
+SATURATE_PIN = "saturate[hf]>=0.1.2"
 
 
 def staging_repo(spec: TaskSpec) -> str:
