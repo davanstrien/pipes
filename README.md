@@ -31,7 +31,7 @@ Zero-config is never magic: every filled blank is labeled with where it came fro
 4 Jobs. Kill anything anytime; re-running the same command resumes exactly
 (results are keyed by row id — done work is never repeated).
 
-**v0 ships two tasks: `embed` and `generate`.** The design is task-general (the
+**v0 ships three tasks: `embed`, `generate` and `ocr`.** The design is task-general (the
 same spec/compile path is built to carry OCR, transcription, ...); more tasks
 land as they earn receipts.
 
@@ -88,6 +88,23 @@ hf pipe generate user/dataset --model Qwen/Qwen2.5-7B-Instruct
 `--model` stays required — there's no honest hand default for open-set
 generation; everything else (column, output, flavor) resolves as with embed.
 One request per row, content-hash row ids (identical prompts dedupe for free).
+
+## The third task: ocr
+
+Point at a bucket of page scans, get a markdown dataset:
+
+```
+hf pipe ocr 'hf://buckets/you/scans/**/*.jpg'
+```
+
+Row ids are file paths, so resume is per-page and a re-run pays listing, not
+transfer. The curated model (LightOnOCR-2-1B) brings its receipted serving
+arrangement and prompt contract from the catalogue; other models run with
+conservative generic defaults, labeled `unverified path`. PDFs are refused —
+rasterization is a separate stage
+([#4](https://github.com/davanstrien/hf-pipe/issues/4)); a dataset-with-image-or-pdf-column
+input mode is the planned follow-up
+([#6](https://github.com/davanstrien/hf-pipe/issues/6)).
 
 ## Tested model paths
 
