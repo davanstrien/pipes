@@ -136,7 +136,7 @@ def main() -> None:
     args = ap.parse_args()
 {{repo_line}}
     def to_request(row: dict) -> dict:
-        return {"model": "tei", "input": row["texts"]}
+        return {"model": MODEL, "input": row["texts"]}
 
     def parse(row: dict, body: dict) -> dict:
         data = body["data"]
@@ -152,7 +152,7 @@ def main() -> None:
     rows = shard_select(batched(rows), rank=args.rank, world=args.world)
     with Engine(MODEL, cmd=TEI_CMD, port=8080,
                 ready_route="/embeddings",
-                ready_payload={"model": "tei", "input": ["ready?"]},
+                ready_payload={"model": MODEL, "input": ["ready?"]},
                 ready_accept=lambda r: r.status_code == 200) as endpoint:
         stats = pump(rows, to_request, parse, endpoint, OUTPUT,
                      route="/embeddings",
