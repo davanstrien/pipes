@@ -31,9 +31,9 @@ Zero-config is never magic: every filled blank is labeled with where it came fro
 4 Jobs. Kill anything anytime; re-running the same command resumes exactly
 (results are keyed by row id — done work is never repeated).
 
-**v0 does one task: `embed`.** The design is task-general (the same spec/compile
-path is built to carry generation, OCR, transcription); more tasks land as they
-earn receipts.
+**v0 ships two tasks: `embed` and `generate`.** The design is task-general (the
+same spec/compile path is built to carry OCR, transcription, ...); more tasks
+land as they earn receipts.
 
 ## Install
 
@@ -76,6 +76,18 @@ uv script (with a `[tool.hf-jobs]` header carrying its Job config) built on
 [saturate](https://github.com/davanstrien/saturate) for adaptive concurrency,
 crash-safe resumable output, and durable error rows. Edit the ejected script
 freely — it has no dependency on this repo.
+
+## The second task: generate
+
+Prompt-in-column text generation, same resolution path:
+
+```
+hf pipe generate user/dataset --model Qwen/Qwen2.5-7B-Instruct
+```
+
+`--model` stays required — there's no honest hand default for open-set
+generation; everything else (column, output, flavor) resolves as with embed.
+One request per row, content-hash row ids (identical prompts dedupe for free).
 
 ## Tested model paths
 
