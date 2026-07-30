@@ -1,0 +1,13 @@
+[project]
+name = "pipes"
+version = "0.0.1"
+description = "Reserved for an in-development Hugging Face data pipelines tool. Not yet functional. (The former stdlib module of this name was removed in Python 3.13, PEP 594; this package deliberately uses a different import name to avoid shadowing it on older Pythons.)"
+readme = "README.md"
+requires-python = ">=3.9"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/datapipes"]
