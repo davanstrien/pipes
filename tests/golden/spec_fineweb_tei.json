@@ -1,0 +1,16 @@
+{
+  "task": "embeddings",
+  "dataset": "HuggingFaceFW/fineweb-edu",
+  "config": "default",
+  "split": "train",
+  "column": "text",
+  "model": "BAAI/bge-m3",
+  "engine": "tei",
+  "flavor": "a10g-small",
+  "world": 1,
+  "output": "hf://buckets/davanstrien/pumpjack/fineweb-edu-bge-m3",
+  "publish": false,
+  "batch": 64,
+  "limit": 12800,
+  "num_examples": 1525223056
+}
