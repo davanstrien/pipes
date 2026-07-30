@@ -21,6 +21,7 @@ come from run.json — launch intent, gaps G1/G4 closed at this layer.
 from __future__ import annotations
 
 import json
+import pathlib
 import re
 from collections import defaultdict
 
@@ -128,6 +129,7 @@ def status(
         "items_per_row": items_per_row,
         "items_ok": rows_ok * items_per_row if items_per_row else None,
         "expected_items": run_json.get("expected_items") if run_json else None,
+        "has_run_json": run_json is not None,
     }
 
     jobs = []
@@ -175,6 +177,15 @@ def _job_stages(jobs: list[dict], token: str | None) -> list[dict]:
     return out
 
 
+def prog() -> str:
+    """The command name the user actually typed: `hf pipe` when running as the
+    extension (argv[0] is the hf-pipe console script), else `jobpipe`."""
+    import sys
+
+    base = pathlib.Path(sys.argv[0]).name
+    return "hf pipe" if base.startswith("hf-pipe") else "jobpipe"
+
+
 def render_human(doc: dict) -> str:
     """Compact terminal view of the progress document."""
     lines = []
@@ -187,7 +198,9 @@ def render_human(doc: dict) -> str:
             + (f"  ≈{p['items_ok']:,} items" if p["items_ok"] else "")
         )
     else:
-        lines.append(f"progress {p['rows_ok']} rows ({marker}) — no denominator (no run.json)")
+        why = ("dataset size unknown at launch" if p.get("has_run_json")
+               else "no run.json")
+        lines.append(f"progress {p['rows_ok']} rows ({marker}) — no denominator ({why})")
     if p["rows_failed"]:
         lines.append(f"failed rows: {p['rows_failed']}")
     stage_by_rank = {j["rank"]: j["stage"] for j in doc["jobs"]}
@@ -203,5 +216,10 @@ def render_human(doc: dict) -> str:
         lines.append(f"  shard {s['rank']} {light}{extra}")
     st = doc["storage"]
     world = f"{st['world']}{' (inferred)' if st['world_inferred'] else ''}"
+    live = [j for j in doc["jobs"] if j.get("stage") not in ("COMPLETED", None)]
+    if live:
+        j = live[0]
+        lines.append(f"logs: {prog()} logs '{doc['output']}'"
+                     + (f"  (rank {j['rank']}: job {j['id']})" if j.get("id") else ""))
     lines.append(f"storage: {st['parts']} parts, {st['orphans']} orphans, world={world}")
     return "\n".join(lines)

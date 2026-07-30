@@ -15,6 +15,7 @@ import sys
 import time
 
 from jobpipe.spec import TaskSpec
+from jobpipe.status import prog
 
 
 def _load_spec(path: str) -> TaskSpec:
@@ -54,7 +55,7 @@ def cmd_run(args) -> int:
         for j in run_json["jobs"]:
             print(f"  rank {j['rank']}: {j['id']}")
         print(f"run.json -> {run_json['spec']['output'].rstrip('/')}/run.json")
-        print(f"watch: jobpipe status '{run_json['spec']['output']}'")
+        print(f"watch: {prog()} status '{run_json['spec']['output']}'")
     return 0
 
 
@@ -117,7 +118,7 @@ def _verb(args, fn, **extra) -> int:
             print(f"run {result.run_id}: {len(result.jobs)} job(s) launched")
             url = _hub_url(result.output)
             print(f"output: {result.output}" + (f"  ({url})" if url else ""))
-            print(f"watch: jobpipe status '{result.output}'")
+            print(f"watch: {prog()} status '{result.output}'")
     else:  # CompiledRun (--compile-only / --dump: nothing launched)
         if args.dump:
             _dump(result, args.dump)
@@ -146,6 +147,36 @@ def cmd_schema(args) -> int:
     return 0
 
 
+def cmd_logs(args) -> int:
+    """Job logs for a run, addressed by its OUTPUT (the one handle users have).
+    Reads run.json's job list and delegates to `hf jobs logs`."""
+    import subprocess
+
+    import fsspec
+
+    with fsspec.open(f"{args.output.rstrip('/')}/run.json", "r") as f:
+        rj = json.load(f)
+    jobs = rj.get("jobs") or []
+    if not jobs:
+        print("run.json has no jobs (launched outside the API path?)", file=sys.stderr)
+        return 1
+    sel = [j for j in jobs if args.rank is None or j["rank"] == args.rank]
+    if not sel:
+        print(f"no job with rank {args.rank}; ranks: {[j['rank'] for j in jobs]}",
+              file=sys.stderr)
+        return 1
+    if args.follow and len(sel) > 1:
+        sel = sel[:1]
+        print("(-f follows rank 0; use --rank N for another shard)", file=sys.stderr)
+    rc = 0
+    for j in sel:
+        ref = f"{j['owner']}/{j['id']}"
+        print(f"--- rank {j['rank']}: {ref} ---", file=sys.stderr)
+        cmd = ["hf", "jobs", "logs"] + (["-f"] if args.follow else []) + [ref]
+        rc = subprocess.run(cmd).returncode or rc
+    return rc
+
+
 def cmd_catalogue(args) -> int:
     from jobpipe import catalogue
 
@@ -166,7 +197,7 @@ def cmd_catalogue(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="jobpipe", description=__doc__)
+    ap = argparse.ArgumentParser(prog=prog(), description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("compile", help="spec.json -> driver + commands + run.json (dry run)")
@@ -228,6 +259,12 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("schema", help="print the TaskSpec JSON schema (the UI contract)")
     p.set_defaults(fn=cmd_schema)
+
+    p = sub.add_parser("logs", help="job logs for a run, by output URI (reads run.json)")
+    p.add_argument("output", help="the run's output URI (same handle as status)")
+    p.add_argument("--rank", type=int, help="one shard only (default: all; -f implies rank 0)")
+    p.add_argument("-f", "--follow", action="store_true")
+    p.set_defaults(fn=cmd_logs)
 
     p = sub.add_parser("catalogue", help="curated model paths per task, with run receipts")
     p.add_argument("task", nargs="?", help="task to show (default: all)")
