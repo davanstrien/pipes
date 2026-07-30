@@ -19,6 +19,35 @@ that product conversation. Rules:
 from __future__ import annotations
 
 CATALOGUE: dict[str, list[dict]] = {
+    "ocr": [
+        {
+            "model": "lightonai/LightOnOCR-2-1B",
+            "engine": "vllm",
+            "why": "1B Apache-2.0 page-to-markdown; deepest receipts in the collection",
+            "prompts": None,  # trained format is the image ONLY (model card)
+            # per-value provenance: serve_args + sampling + 1540px = card
+            # verbatim; max_model_len 8192 = house choice (halves KV on 24GB,
+            # fits a 1540px page + 4096 output) — same split as the uv-scripts
+            # SERVING dict this mirrors
+            "serving": {
+                "image": "vllm/vllm-openai:latest",
+                "max_model_len": 8192,
+                "serve_args": ["--limit-mm-per-prompt", '{"image": 1}',
+                               "--mm-processor-cache-gb", "0",
+                               "--no-enable-prefix-caching"],
+                "max_tokens": 4096,
+                "temperature": 0.2,
+                "top_p": 0.9,
+                "target_size": 1540,
+            },
+            "receipts": [
+                {"date": "2026-07-30", "job": "6a6a7ead",
+                 "note": "uv-scripts companion validation: 20/20 pages, 1,010 tok/s, 0 error rows"},
+                {"date": "2026-07-29", "job": "1k-A/B",
+                 "note": "1,000-page A/B: 0.955 img/s incl. streaming = offline recipe parity"},
+            ],
+        },
+    ],
     "embeddings": [
         {
             "model": "BAAI/bge-m3",

@@ -142,6 +142,32 @@ def cmd_generate(args) -> int:
     return _verb(args, generate, max_tokens=args.max_tokens, temperature=args.temperature)
 
 
+def cmd_ocr(args) -> int:
+    from jobpipe.api import ocr
+
+    kwargs = dict(model=args.model, output=args.output, flavor=args.flavor,
+                  world=args.world, limit=args.limit, max_tokens=args.max_tokens,
+                  launch=not (args.compile_only or args.dump),
+                  token=args.token, namespace=args.namespace)
+    result = ocr(args.glob, **kwargs)
+    from jobpipe.api import Run
+
+    if isinstance(result, Run):
+        print(f"run {result.run_id}: {len(result.jobs)} job(s) launched")
+        url = _hub_url(result.output)
+        print(f"output: {result.output}" + (f"  ({url})" if url else ""))
+        print(f"watch: {prog()} status '{result.output}'")
+    else:
+        if args.dump:
+            _dump(result, args.dump)
+        elif args.json:
+            print(json.dumps({"driver_name": result.driver_name, "driver": result.driver,
+                              "commands": result.commands, "run_json": result.run_json}))
+        else:
+            print(result.driver)
+    return 0
+
+
 def cmd_schema(args) -> int:
     print(json.dumps(TaskSpec.model_json_schema(), indent=2))
     return 0
@@ -259,6 +285,21 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("schema", help="print the TaskSpec JSON schema (the UI contract)")
     p.set_defaults(fn=cmd_schema)
+
+    p = sub.add_parser("ocr", help="OCR a bucket glob of page images to markdown")
+    p.add_argument("glob", help="hf://buckets/owner/name/**/*.jpg (images; PDFs need issue #4)")
+    p.add_argument("--model", help="default: curated OCR model from the catalogue")
+    p.add_argument("--output", help="default: private dataset repo under you")
+    p.add_argument("--flavor")
+    p.add_argument("--world", type=int)
+    p.add_argument("--limit", type=int)
+    p.add_argument("--max-tokens", type=int)
+    p.add_argument("--compile-only", action="store_true")
+    p.add_argument("--dump", metavar="FILE")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--token")
+    p.add_argument("--namespace")
+    p.set_defaults(fn=cmd_ocr)
 
     p = sub.add_parser("logs", help="job logs for a run, by output URI (reads run.json)")
     p.add_argument("output", help="the run's output URI (same handle as status)")

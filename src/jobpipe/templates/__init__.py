@@ -8,9 +8,9 @@ The seed ships exactly one: embeddings.
 
 from __future__ import annotations
 
-from jobpipe.templates import embeddings, generation
+from jobpipe.templates import embeddings, generation, ocr
 
-_TEMPLATES = {"embeddings": embeddings, "generation": generation}
+_TEMPLATES = {"embeddings": embeddings, "generation": generation, "ocr": ocr}
 
 
 def get_template(task: str):

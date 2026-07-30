@@ -47,9 +47,13 @@ class Resolution:
 
 
 def _repo_slug(dataset: str, task: str) -> str:
-    name = dataset.split("/")[-1] or "ds"
+    if dataset.startswith("hf://buckets/"):
+        parts = dataset.removeprefix("hf://buckets/").split("/")
+        name = parts[1] if len(parts) > 1 else (parts[0] or "bucket")
+    else:
+        name = dataset.split("/")[-1] or "ds"
     name = re.sub(r"[^A-Za-z0-9-]+", "-", name).strip("-") or "ds"
-    suffix = {"embeddings": "embeddings", "generation": "generated"}.get(task, task)
+    suffix = {"embeddings": "embeddings", "generation": "generated", "ocr": "ocr"}.get(task, task)
     return f"{name}-{suffix}"[:96]
 
 
@@ -72,6 +76,9 @@ def resolve(
     prov: dict[str, str] = {"dataset": "user"}
     notes: dict[str, str] = {}
     vals: dict[str, object] = {"task": task, "dataset": dataset}
+
+    if task == "ocr":
+        return _resolve_bucket_task(task, dataset, user, prov, notes, vals, token)
 
     # --- config / split: never assume default/train exist -------------------
     layout = None
@@ -182,4 +189,52 @@ def resolve(
             vals[f] = user[f]
             prov[f] = "user"
 
+    return Resolution(spec=TaskSpec(**vals), provenance=prov, notes=notes)
+
+
+def _resolve_bucket_task(task, dataset, user, prov, notes, vals, token) -> Resolution:
+    """Bucket-glob tasks: no config/split/column reads — the introspection
+    surface is the glob itself (validated by the spec) + the catalogue."""
+    notes["dataset"] = "bucket glob; ids = file paths, resume per page"
+    entry = None
+    if "model" in user:
+        vals["model"] = user["model"]
+        prov["model"] = "user"
+        entry = catalogue.lookup(task, str(user["model"]))
+        if entry:
+            notes["model"] = f"in catalogue: {entry['why']}"
+        elif catalogue.entries(task):
+            notes["model"] = ("not in catalogue — unverified path: generic prompt, "
+                             "conservative serving defaults")
+    else:
+        entry = catalogue.default_entry(task)
+        if entry is None:
+            raise ValueError(f"no curated model for task {task!r} — pass model=")
+        vals["model"] = entry["model"]
+        prov["model"] = "curated"
+        notes["model"] = entry["why"]
+
+    vals["engine"] = user.get("engine", "vllm")
+    prov["engine"] = "user" if "engine" in user else "curated"
+    if "flavor" in user:
+        vals["flavor"] = user["flavor"]
+        prov["flavor"] = "user"
+    else:
+        vals["flavor"] = "a10g-small"
+        prov["flavor"] = "default"
+        notes["flavor"] = "the port-matrix workhorse; override for bigger pages/models"
+
+    if "output" in user:
+        vals["output"] = user["output"]
+        prov["output"] = "user"
+    else:
+        owner = _whoami(token)
+        vals["output"] = f"hf://datasets/{owner}/{_repo_slug(dataset, task)}/data"
+        prov["output"] = "default"
+        notes["output"] = "private dataset repo, created on first write"
+
+    for f in ("world", "limit", "max_tokens", "publish"):
+        if f in user:
+            vals[f] = user[f]
+            prov[f] = "user"
     return Resolution(spec=TaskSpec(**vals), provenance=prov, notes=notes)

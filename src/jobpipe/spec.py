@@ -23,7 +23,7 @@ Flavor = Literal[
 
 
 class TaskSpec(BaseModel):
-    task: Literal["embeddings", "generation", "translation"] = "embeddings"
+    task: Literal["embeddings", "generation", "translation", "ocr"] = "embeddings"
     dataset: str  # "HuggingFaceFW/fineweb-edu"
     config: str = "default"
     split: str = "train"
@@ -47,6 +47,24 @@ class TaskSpec(BaseModel):
 
     @model_validator(mode="after")
     def _task_rules(self) -> TaskSpec:
+        if self.task == "ocr":
+            if not self.dataset.startswith("hf://buckets/"):
+                raise ValueError(
+                    "ocr reads a bucket glob of page images "
+                    "(hf://buckets/owner/name/**/*.jpg) — got a dataset id; "
+                    "dataset-image-column input is a planned follow-up"
+                )
+            if ".pdf" in self.dataset.lower():
+                raise ValueError(
+                    "PDFs need a rasterize stage first (hf-pipe issue #4) — "
+                    "ocr v1 reads page IMAGES (*.jpg / *.png)"
+                )
+            if self.engine != "vllm":
+                raise ValueError("ocr currently supports engine='vllm' only")
+            if self.batch not in (None, 1):
+                raise ValueError("ocr is one page per request (batch=1)")
+            self.batch = 1
+            return self
         if self.task in ("generation", "translation"):
             if self.batch not in (None, 1):
                 raise ValueError(
@@ -64,9 +82,14 @@ class TaskSpec(BaseModel):
 
     @property
     def slug(self) -> str:
-        name = (self.dataset.split("/")[1] if "/" in self.dataset else "ds") or "ds"
+        if self.task == "ocr":  # dataset carries a bucket glob, not a repo id
+            parts = self.dataset.removeprefix("hf://buckets/").split("/")
+            name = parts[1] if len(parts) > 1 else (parts[0] or "bucket")
+        else:
+            name = (self.dataset.split("/")[1] if "/" in self.dataset else "ds") or "ds"
         name = re.sub(r"[^a-z0-9-]+", "-", name.lower())
-        prefix = {"generation": "gen", "translation": "translate"}.get(self.task, "embed")
+        prefix = {"generation": "gen", "translation": "translate",
+                  "ocr": "ocr"}.get(self.task, "embed")
         return f"{prefix}_{name}"[:40]
 
     @property

@@ -71,7 +71,9 @@ def compile(
     run_id: str | None = None,
     token: str | None = None,
 ) -> CompiledRun:
-    if spec.num_examples is None:
+    if spec.num_examples is None and spec.task != "ocr":
+        # ocr's `dataset` is a bucket glob — the viewer has nothing to say;
+        # the denominator stays honest-None (page count unknown pre-listing)
         n = introspect.num_examples(spec.dataset, spec.config, spec.split, token=token)
         spec = spec.model_copy(update={"num_examples": n})
 

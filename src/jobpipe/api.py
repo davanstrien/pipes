@@ -136,6 +136,21 @@ def embed(dataset: str, *, model: str | None = None, output: str | None = None,
     return _run(r.spec, launch=launch, token=token, namespace=namespace, resolution=r)
 
 
+def ocr(glob: str, *, model: str | None = None, output: str | None = None,
+        flavor: str | None = None, world: int | None = None,
+        limit: int | None = None, max_tokens: int | None = None,
+        launch: bool = True, token: str | None = None,
+        namespace: str | None = None, verbose: bool = True) -> Run | CompiledRun:
+    """OCR a bucket glob of page images to markdown. Zero-config: the curated
+    OCR model (with its receipted serving arrangement + prompt contract)
+    resolves from the catalogue; any other model runs as an unverified path.
+    PDFs are refused — rasterization is a separate stage (issue #4)."""
+    r = _resolved("ocr", glob, token=token, verbose=verbose,
+                  model=model, output=output, flavor=flavor, world=world,
+                  limit=limit, max_tokens=max_tokens)
+    return _run(r.spec, launch=launch, token=token, namespace=namespace, resolution=r)
+
+
 def generate(dataset: str, *, model: str, output: str | None = None,
              column: str | None = None, max_tokens: int | None = None,
              temperature: float | None = None, flavor: str | None = None,
