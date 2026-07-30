@@ -52,7 +52,10 @@ def status(
     include_jobs: bool = True,
     token: str | None = None,
 ) -> dict:
-    fs, root = fsspec.core.url_to_fs(output_uri)
+    # token threads into the filesystem too — hosted contexts (Spaces) have no
+    # ambient token, and the storage channel must see private repos (same bug
+    # family as the launcher's run.json write; found live twice on 2026-07-30)
+    fs, root = fsspec.core.url_to_fs(output_uri, **({"token": token} if token else {}))
     root = root.rstrip("/")
     try:
         found = fs.find(root)
