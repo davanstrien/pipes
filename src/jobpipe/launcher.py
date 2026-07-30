@@ -37,9 +37,12 @@ def _ensure_output_container(api: HfApi, output: str) -> None:
         api.create_repo(repo, repo_type="dataset", private=True, exist_ok=True)
 
 
-def write_run_json(output: str, run_json: dict) -> str:
+def write_run_json(output: str, run_json: dict, token: str | None = None) -> str:
+    # token must be passed explicitly: in hosted contexts (Spaces) there is no
+    # ambient cached token, and fsspec alone can't see the private repo the
+    # same launch just created (found live: Space launch, 2026-07-30)
     uri = f"{output.rstrip('/')}/run.json"
-    with fsspec.open(uri, "w") as f:
+    with fsspec.open(uri, "w", token=token) as f:
         f.write(json.dumps(run_json, indent=2))
     return uri
 
@@ -96,5 +99,5 @@ def launch(
     run_json = dict(compiled.run_json)
     run_json["jobs"] = jobs
     run_json["created_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
-    write_run_json(spec.output, run_json)
+    write_run_json(spec.output, run_json, token=token)
     return run_json
