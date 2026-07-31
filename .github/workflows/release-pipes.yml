@@ -1,6 +1,4 @@
-# Claims/releases the `pipes` PyPI name from pipes-stub/ (saturate's
-# trusted-publishing pattern). The placeholder holds the name while the
-# DataPipes/pipes product naming settles — transfer-ready, no tokens anywhere.
+# Publishes pipes-stub/ to PyPI via trusted publishing (OIDC, no tokens).
 name: release-pipes
 on:
   push:

@@ -1,7 +1,7 @@
 [project]
 name = "hf-pipe"
 version = "0.0.1"
-description = "Reserved for an in-development Hugging Face data pipelines tool. Not yet functional."
+description = "Placeholder for a work-in-progress tool. Not yet functional."
 readme = "README.md"
 requires-python = ">=3.9"
 
