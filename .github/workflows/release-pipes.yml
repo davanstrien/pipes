@@ -1,0 +1,18 @@
+# Publishes pipes-stub/ to PyPI via trusted publishing (OIDC, no tokens).
+name: release-pipes
+on:
+  push:
+    tags: ["pipes-v*"]
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # PyPI trusted publishing (OIDC)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv build
+        working-directory: pipes-stub
+      - run: uv publish --trusted-publishing always
+        working-directory: pipes-stub
