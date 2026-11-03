@@ -84,5 +84,7 @@ def test_dataset_output_gets_viewer_card():
     )
     c = compile(spec, run_id=RUN_ID)
     assert 'create_repo("davanstrien/embed-out"' in c.driver
-    assert "config_name: manifest" in c.driver  # explicit configs beat viewer glob
+    assert "config_name: data" in c.driver  # explicit config names the data parts
+    # saturate 0.3 sidecars sit under __saturate/ (loaders skip it): no manifest config
+    assert "config_name: manifest" not in c.driver
     assert "run1/part-*.parquet" in c.driver

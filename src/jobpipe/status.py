@@ -6,7 +6,8 @@ shape. Ported from the console POC's dashboard reads (analyze/renderRun),
 which the pumpjack CONTRACT doubles as the storage side of.
 
 Two channels merge here:
-- exact/storage: part files + completions/stats-{n}.json (exact counts) with
+- exact/storage: part files + __saturate/completions/stats-{n}.json (exact
+  counts; at the root in outputs written before saturate 0.3) with
   telemetry Sum(ok) as the approximate fallback — approximate because ticks
   sample a counter and the tail goes uncounted (measured: a 3,125-row run
   reporting 3,120 from telemetry alone);
@@ -31,10 +32,22 @@ import fsspec
 # 2026-07-29 saturate filename change (part-{epoch}-{seq}-{uuid8}) and any
 # future segment additions don't zero the count (bug found by live run 9fee4f3d)
 PART_RE = re.compile(r"^part-[0-9a-f-]+\.parquet$")
-MANIFEST_RE = re.compile(r"^_manifest/ids-(part-[0-9a-f-]+\.parquet)$")
-MARKER_RE = re.compile(r"^completions/shard-(\d+)\.done$")
-STATS_RE = re.compile(r"^completions/stats-(\d+)\.json$")
-TELEMETRY_RE = re.compile(r"^telemetry-shard(\d+)-(\d+)\.jsonl$")
+
+# Sidecar layouts. saturate 0.3 writes every sidecar under `__saturate/`;
+# outputs written before 0.3 keep them at the root. A 0.2 output resumed under
+# 0.3 holds both, so each pattern accepts both and the 0.3 file wins a tie.
+SIDECAR_DIR = "__saturate"
+MANIFEST_RE = re.compile(r"^(?:__saturate/manifest|_manifest)/ids-(part-[0-9a-f-]+\.parquet)$")
+MARKER_RE = re.compile(r"^(?:__saturate/)?completions/shard-(\d+)\.done$")
+STATS_RE = re.compile(r"^(?:__saturate/)?completions/stats-(\d+)\.json$")
+# telemetry-shard{rank}-{epoch}[-{hex}].jsonl; saturate added the hex suffix
+TELEMETRY_RE = re.compile(
+    r"^(?:__saturate/telemetry/)?telemetry-shard(\d+)-(\d+)(?:-[0-9a-f]+)?\.jsonl$"
+)
+
+def _in_sidecar_dir(path: str) -> bool:
+    return path.startswith(f"{SIDECAR_DIR}/")
+
 
 TICK_WINDOW = 120  # ticks kept per shard in the document (~4 min at 2s/tick)
 
@@ -66,8 +79,30 @@ def status(
     parts = sorted(p for p in rel if PART_RE.match(p))
     manifests = {m.group(1) for p in rel if (m := MANIFEST_RE.match(p))}
     orphans = [p for p in parts if p not in manifests]  # crash window <= flush_every rows
-    markers = sorted(int(m.group(1)) for p in rel if (m := MARKER_RE.match(p)))
-    stats_paths = {int(m.group(1)): p for p in rel if (m := STATS_RE.match(p))}
+    # A shard with any __saturate/ sidecar has run under 0.3 since its root
+    # files were written, so a root marker for it is stale: it must not mark
+    # the shard done while the 0.3 run is still going.
+    ranks_in_sidecar_dir = set()
+    for p in rel:
+        if not _in_sidecar_dir(p):
+            continue
+        m = MARKER_RE.match(p) or STATS_RE.match(p) or TELEMETRY_RE.match(p)
+        if m:
+            ranks_in_sidecar_dir.add(int(m.group(1)))
+    marker_ranks = set()
+    for p in rel:
+        m = MARKER_RE.match(p)
+        if not m:
+            continue
+        rank = int(m.group(1))
+        if _in_sidecar_dir(p) or rank not in ranks_in_sidecar_dir:
+            marker_ranks.add(rank)
+    markers = sorted(marker_ranks)
+    # old layout first, so a 0.3 stats file overwrites a 0.2 one for the same rank
+    stats_paths = {}
+    for p in sorted(rel, key=_in_sidecar_dir):
+        if m := STATS_RE.match(p):
+            stats_paths[int(m.group(1))] = p
     stats = {
         rank: s
         for rank, p in sorted(stats_paths.items())
@@ -79,12 +114,13 @@ def status(
     telem_files = defaultdict(list)  # rank -> [(ts, relpath)]
     for p in rel:
         if m := TELEMETRY_RE.match(p):
-            telem_files[int(m.group(1))].append((int(m.group(2)), p))
+            # (epoch, layout, path): on an epoch tie the __saturate/ file is newer
+            telem_files[int(m.group(1))].append((int(m.group(2)), _in_sidecar_dir(p), p))
     ok_sum = 0
     ticks_by_rank: dict[str, list[dict]] = {}
     for rank, files in sorted(telem_files.items()):
         files.sort()
-        for i, (_ts, p) in enumerate(files):
+        for i, (_ts, _new, p) in enumerate(files):
             ticks = []
             try:
                 with fs.open(f"{root}/{p}", "r") as f:
@@ -113,13 +149,18 @@ def status(
         elif seen:
             world, world_inferred = max(seen) + 1, True
 
+    # rows_errored_prior (saturate 0.3) is the part of rows_done_prior whose only
+    # record is an error: a resume skips those rows, so they count as failed
     exact = bool(stats)
-    rows_ok = (
-        sum(s.get("rows_done_prior", 0) + s.get("rows_processed", 0) for s in stats.values())
-        if exact
-        else ok_sum
-    )
-    rows_failed = sum(s.get("rows_failed", 0) for s in stats.values()) if exact else None
+    rows_ok = ok_sum
+    rows_failed = None
+    if exact:
+        rows_ok = 0
+        rows_failed = 0
+        for s in stats.values():
+            errored_prior = s.get("rows_errored_prior", 0)
+            rows_ok += s.get("rows_done_prior", 0) - errored_prior + s.get("rows_processed", 0)
+            rows_failed += s.get("rows_failed", 0) + errored_prior
 
     expected_rows = run_json.get("expected_rows") if run_json else None
     items_per_row = run_json.get("items_per_row") if run_json else None

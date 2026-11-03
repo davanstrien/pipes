@@ -68,7 +68,7 @@ the minute; the runs above cost a few cents each.
 ```
 hf pipe embed user/dataset --compile-only    # print the exact code + commands, launch nothing
 hf pipe embed user/dataset --dump my.py      # eject an editable uv script, launch nothing
-hf jobs uv run --flavor a10g-small --image vllm/vllm-openai:latest -s HF_TOKEN my.py
+hf jobs uv run --flavor a10g-small --image vllm/vllm-openai:v0.33.0 -s HF_TOKEN my.py
 ```
 
 The generated driver is a self-contained [PEP 723](https://peps.python.org/pep-0723/)

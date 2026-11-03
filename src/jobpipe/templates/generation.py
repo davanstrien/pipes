@@ -134,7 +134,7 @@ def launch_commands(spec: TaskSpec, driver_filename: str) -> list[str]:
 def publish_command(spec: TaskSpec, owner: str) -> str:
     target = f"{owner}/{spec.slug.replace('_', '-')}"
     return (
-        f"# after all {spec.world} shard marker(s) appear in completions/\n"
+        f"# after all {spec.world} shard marker(s) appear in __saturate/completions/\n"
         "hf jobs run --flavor cpu-upgrade --secrets HF_TOKEN \\\n"
         "  ghcr.io/astral-sh/uv:python3.12-bookworm \\\n"
         f"  bash -c 'uv pip install --system -q \"{SATURATE_PIN}\" && python3 -c \"\n"

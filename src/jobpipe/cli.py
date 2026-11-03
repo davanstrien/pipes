@@ -59,6 +59,18 @@ def cmd_run(args) -> int:
     return 0
 
 
+ACTIVE_STAGES = ("SCHEDULING", "RUNNING")
+
+
+def watch_done(doc: dict) -> bool:
+    """`status --watch` ends when every shard has a marker and no Job from
+    run.json is still scheduling or running. A marker alone is not enough: a
+    re-run into a finished output keeps the earlier run's markers."""
+    if not doc["shards"] or not all(s["done"] for s in doc["shards"]):
+        return False
+    return not any(j.get("stage") in ACTIVE_STAGES for j in doc["jobs"])
+
+
 def cmd_status(args) -> int:
     from jobpipe.status import render_human, status
 
@@ -68,8 +80,7 @@ def cmd_status(args) -> int:
             print(json.dumps(doc), flush=True)
         else:
             print(render_human(doc), flush=True)
-        done = doc["shards"] and all(s["done"] for s in doc["shards"])
-        if not args.watch or done:
+        if not args.watch or watch_done(doc):
             return 0
         time.sleep(args.interval)
 
