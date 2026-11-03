@@ -47,3 +47,16 @@ def test_generate_still_requires_model(monkeypatch, capsys):
         raise AssertionError("argparse should have exited")
     except SystemExit as e:
         assert e.code == 2
+
+
+def test_watch_done_waits_for_active_jobs():
+    from jobpipe.cli import watch_done
+
+    shards_done = [{"rank": 0, "done": True}, {"rank": 1, "done": True}]
+    assert watch_done({"shards": shards_done, "jobs": []})
+    assert watch_done({"shards": shards_done, "jobs": [{"rank": 0, "stage": "COMPLETED"}]})
+    # a re-run into a finished output: old markers, but a Job is still running
+    assert not watch_done({"shards": shards_done, "jobs": [{"rank": 0, "stage": "RUNNING"}]})
+    assert not watch_done({"shards": shards_done, "jobs": [{"rank": 1, "stage": "SCHEDULING"}]})
+    assert not watch_done({"shards": [{"rank": 0, "done": False}], "jobs": []})
+    assert not watch_done({"shards": [], "jobs": []})

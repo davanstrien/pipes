@@ -45,6 +45,10 @@ TELEMETRY_RE = re.compile(
     r"^(?:__saturate/telemetry/)?telemetry-shard(\d+)-(\d+)(?:-[0-9a-f]+)?\.jsonl$"
 )
 
+def _in_sidecar_dir(path: str) -> bool:
+    return path.startswith(f"{SIDECAR_DIR}/")
+
+
 TICK_WINDOW = 120  # ticks kept per shard in the document (~4 min at 2s/tick)
 
 
@@ -75,10 +79,28 @@ def status(
     parts = sorted(p for p in rel if PART_RE.match(p))
     manifests = {m.group(1) for p in rel if (m := MANIFEST_RE.match(p))}
     orphans = [p for p in parts if p not in manifests]  # crash window <= flush_every rows
-    markers = sorted({int(m.group(1)) for p in rel if (m := MARKER_RE.match(p))})
+    # A shard with any __saturate/ sidecar has run under 0.3 since its root
+    # files were written, so a root marker for it is stale: it must not mark
+    # the shard done while the 0.3 run is still going.
+    ranks_in_sidecar_dir = set()
+    for p in rel:
+        if not _in_sidecar_dir(p):
+            continue
+        m = MARKER_RE.match(p) or STATS_RE.match(p) or TELEMETRY_RE.match(p)
+        if m:
+            ranks_in_sidecar_dir.add(int(m.group(1)))
+    marker_ranks = set()
+    for p in rel:
+        m = MARKER_RE.match(p)
+        if not m:
+            continue
+        rank = int(m.group(1))
+        if _in_sidecar_dir(p) or rank not in ranks_in_sidecar_dir:
+            marker_ranks.add(rank)
+    markers = sorted(marker_ranks)
     # old layout first, so a 0.3 stats file overwrites a 0.2 one for the same rank
     stats_paths = {}
-    for p in sorted(rel, key=lambda p: p.startswith(f"{SIDECAR_DIR}/")):
+    for p in sorted(rel, key=_in_sidecar_dir):
         if m := STATS_RE.match(p):
             stats_paths[int(m.group(1))] = p
     stats = {
@@ -92,12 +114,13 @@ def status(
     telem_files = defaultdict(list)  # rank -> [(ts, relpath)]
     for p in rel:
         if m := TELEMETRY_RE.match(p):
-            telem_files[int(m.group(1))].append((int(m.group(2)), p))
+            # (epoch, layout, path): on an epoch tie the __saturate/ file is newer
+            telem_files[int(m.group(1))].append((int(m.group(2)), _in_sidecar_dir(p), p))
     ok_sum = 0
     ticks_by_rank: dict[str, list[dict]] = {}
     for rank, files in sorted(telem_files.items()):
         files.sort()
-        for i, (_ts, p) in enumerate(files):
+        for i, (_ts, _new, p) in enumerate(files):
             ticks = []
             try:
                 with fs.open(f"{root}/{p}", "r") as f:
@@ -126,13 +149,18 @@ def status(
         elif seen:
             world, world_inferred = max(seen) + 1, True
 
+    # rows_errored_prior (saturate 0.3) is the part of rows_done_prior whose only
+    # record is an error: a resume skips those rows, so they count as failed
     exact = bool(stats)
-    rows_ok = (
-        sum(s.get("rows_done_prior", 0) + s.get("rows_processed", 0) for s in stats.values())
-        if exact
-        else ok_sum
-    )
-    rows_failed = sum(s.get("rows_failed", 0) for s in stats.values()) if exact else None
+    rows_ok = ok_sum
+    rows_failed = None
+    if exact:
+        rows_ok = 0
+        rows_failed = 0
+        for s in stats.values():
+            errored_prior = s.get("rows_errored_prior", 0)
+            rows_ok += s.get("rows_done_prior", 0) - errored_prior + s.get("rows_processed", 0)
+            rows_failed += s.get("rows_failed", 0) + errored_prior
 
     expected_rows = run_json.get("expected_rows") if run_json else None
     items_per_row = run_json.get("items_per_row") if run_json else None

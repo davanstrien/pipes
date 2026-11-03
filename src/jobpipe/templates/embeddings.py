@@ -20,7 +20,8 @@ Serving-arm rule (which engine to default to lives in introspect.py):
 
 Scale receipt: the same driver at world=1 vs world=4 (200k fineweb-edu texts,
 a10g-small) went 163 -> 633 texts/s, 3.81x, ~$1.70/M texts, with a 22-line
-driver diff — fan-out is strided shard_select, no coordinator.
+driver diff — fan-out is shard_select (strided then; a hash of the row id
+since saturate 0.3), no coordinator.
 
 Micro-batching stays caller-side deliberately (rows-only boundary): the
 inline `batched()` in the driver is the missing `saturate.source.batched`

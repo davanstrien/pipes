@@ -139,10 +139,42 @@ def test_resumed_02_output_prefers_03_sidecars(tmp_path):
     new = out / "__saturate" / "completions"
     new.mkdir(parents=True)
     (new / "shard-0.done").write_bytes(b"done")
-    resumed = {**STATS_0, "rows_done_prior": 100, "rows_processed": 50, "rows_failed": 1}
+    # 2 of the 100 prior rows have only an error record: the resume skipped them
+    resumed = {
+        **STATS_0,
+        "rows_done_prior": 100,
+        "rows_errored_prior": 2,
+        "rows_processed": 50,
+        "rows_failed": 1,
+    }
     (new / "stats-0.json").write_text(json.dumps(resumed))
 
     doc = status(str(out), include_jobs=False)
-    assert doc["progress"]["rows_ok"] == 150  # 0.3 file, not the 0.2 file's 100
-    assert doc["progress"]["rows_failed"] == 1
+    assert doc["progress"]["rows_ok"] == 148  # 0.3 file: 100 - 2 errored + 50
+    assert doc["progress"]["rows_failed"] == 3  # 1 this run + 2 skipped error rows
     assert [s["rank"] for s in doc["shards"] if s["done"]] == [0]  # one marker, not two
+
+
+def test_stale_root_marker_does_not_mark_a_resumed_shard_done(tmp_path):
+    """A 0.2 output resumed under 0.3: shard 0 has a root marker from the
+    earlier run and 0.3 telemetry from the running one, but no 0.3 marker."""
+    out = make_run(tmp_path, layout="0.2")
+    telem = out / "__saturate" / "telemetry"
+    telem.mkdir(parents=True)
+    (telem / "telemetry-shard0-300-a1b2c3.jsonl").write_text(json.dumps({"t": 0, "ok": 5}) + "\n")
+
+    doc = status(str(out), include_jobs=False)
+    assert not {s["rank"]: s for s in doc["shards"]}[0]["done"]
+
+
+def test_telemetry_epoch_tie_prefers_sidecar_dir(tmp_path):
+    out = tmp_path / "run"
+    (out / "__saturate" / "telemetry").mkdir(parents=True)
+    (out / "telemetry-shard0-100.jsonl").write_text(json.dumps({"t": 0, "ok": 1}) + "\n")
+    (out / "__saturate" / "telemetry" / "telemetry-shard0-100-a1b2c3.jsonl").write_text(
+        json.dumps({"t": 0, "ok": 2}) + "\n"
+    )
+
+    doc = status(str(out), include_jobs=False)
+    assert [t["ok"] for t in doc["telemetry"]["0"]] == [2]  # the __saturate/ file
+    assert doc["progress"]["rows_ok"] == 3  # Sum(ok) still counts both files
