@@ -34,8 +34,9 @@ import re
 
 from jobpipe.spec import TaskSpec
 
-# [hf] extra = huggingface_hub (hf:// output) + datasets (dataset_rows)
-SATURATE_PIN = "saturate[hf]>=0.1.2"
+# [hf] extra = huggingface_hub (hf:// output) + datasets (dataset_rows).
+# Exact pin: saturate 0.x minor releases can change the output layout.
+SATURATE_PIN = "saturate[hf]==0.3.0"
 
 
 def staging_repo(spec: TaskSpec) -> str:
@@ -55,7 +56,8 @@ TEI_IMAGES = {
     "l40sx1": "89-latest",
 }
 
-VLLM_IMAGE = "vllm/vllm-openai:latest"
+# Exact tag: `latest` moves with each vLLM release (v0.33.0 = latest on 2026-11-03).
+VLLM_IMAGE = "vllm/vllm-openai:v0.33.0"
 
 # vLLM pooling flags: the 32k-text spike (500/500 rows, 7.85M tokens, 33.5k
 # tok/s, spikes/RESULTS.md). `--task embed` is gone upstream; current form is
@@ -242,8 +244,9 @@ def _out_repo_line(spec: TaskSpec) -> str:
     # Pre-create the output container: a first run into a fresh repo/bucket
     # otherwise dies in existing_ids() — glob on a missing repo raises instead
     # of reading as an empty done-set (reported upstream; found by a real
-    # launch). Dataset outputs also get a viewer card: without explicit configs
-    # the viewer auto-globs ALL parquet and lands on the _manifest sidecars.
+    # launch). Dataset outputs also get a viewer card that names the data parts.
+    # saturate 0.3 writes its sidecars under __saturate/, which the viewer and
+    # loaders skip, so the card declares one config only.
     if spec.output.startswith("hf://datasets/"):
         out_type = "dataset"
     elif spec.output.startswith("hf://buckets/"):
@@ -265,10 +268,7 @@ def _out_repo_line(spec: TaskSpec) -> str:
         f'    if not api.file_exists("{out_repo}", "README.md", repo_type="dataset"):\n'
         '        card = ("---\\nconfigs:\\n- config_name: data\\n  data_files:\\n"\n'
         f'                "  - split: train\\n    path: {out_sub}/part-*.parquet\\n'
-        '  default: true\\n"\n'
-        '                "- config_name: manifest\\n  data_files:\\n"\n'
-        f'                "  - split: train\\n    path: {out_sub}/_manifest/ids-*.parquet\\n'
-        '---\\n"\n'
+        '  default: true\\n---\\n"\n'
         '                "# saturate output\\n")\n'
         "        api.upload_file(path_or_fileobj=card.encode(), path_in_repo=\"README.md\",\n"
         f'                        repo_id="{out_repo}", repo_type="dataset")\n'
@@ -367,7 +367,7 @@ def publish_command(spec: TaskSpec, owner: str) -> str:
     # dataset. Runs on CPU after all shard markers appear.
     target = f"{owner}/{spec.slug.replace('_', '-')}"
     return (
-        f"# after all {spec.world} shard marker(s) appear in completions/\n"
+        f"# after all {spec.world} shard marker(s) appear in __saturate/completions/\n"
         "hf jobs run --flavor cpu-upgrade --secrets HF_TOKEN \\\n"
         "  ghcr.io/astral-sh/uv:python3.12-bookworm \\\n"
         f"  bash -c 'uv pip install --system -q \"{SATURATE_PIN}\" && python3 -c \"\n"

@@ -74,6 +74,6 @@ def test_publish_shell_shape(monkeypatch):
     out = run.publish("me/embeds", token="t")
     assert out["repo_id"] == "me/embeds" and out["job_id"] == "job1"
     shell = captured["command"][-1]
-    assert 'pip install -q "saturate[hf]"' in shell
+    assert 'pip install -q "saturate[hf]==' in shell
     assert "read_output" in shell and "push_to_hub" in shell
     assert captured["flavor"] == "cpu-upgrade"

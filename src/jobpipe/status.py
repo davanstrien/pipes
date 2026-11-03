@@ -6,7 +6,8 @@ shape. Ported from the console POC's dashboard reads (analyze/renderRun),
 which the pumpjack CONTRACT doubles as the storage side of.
 
 Two channels merge here:
-- exact/storage: part files + completions/stats-{n}.json (exact counts) with
+- exact/storage: part files + __saturate/completions/stats-{n}.json (exact
+  counts; at the root in outputs written before saturate 0.3) with
   telemetry Sum(ok) as the approximate fallback — approximate because ticks
   sample a counter and the tail goes uncounted (measured: a 3,125-row run
   reporting 3,120 from telemetry alone);
@@ -31,10 +32,18 @@ import fsspec
 # 2026-07-29 saturate filename change (part-{epoch}-{seq}-{uuid8}) and any
 # future segment additions don't zero the count (bug found by live run 9fee4f3d)
 PART_RE = re.compile(r"^part-[0-9a-f-]+\.parquet$")
-MANIFEST_RE = re.compile(r"^_manifest/ids-(part-[0-9a-f-]+\.parquet)$")
-MARKER_RE = re.compile(r"^completions/shard-(\d+)\.done$")
-STATS_RE = re.compile(r"^completions/stats-(\d+)\.json$")
-TELEMETRY_RE = re.compile(r"^telemetry-shard(\d+)-(\d+)\.jsonl$")
+
+# Sidecar layouts. saturate 0.3 writes every sidecar under `__saturate/`;
+# outputs written before 0.3 keep them at the root. A 0.2 output resumed under
+# 0.3 holds both, so each pattern accepts both and the 0.3 file wins a tie.
+SIDECAR_DIR = "__saturate"
+MANIFEST_RE = re.compile(r"^(?:__saturate/manifest|_manifest)/ids-(part-[0-9a-f-]+\.parquet)$")
+MARKER_RE = re.compile(r"^(?:__saturate/)?completions/shard-(\d+)\.done$")
+STATS_RE = re.compile(r"^(?:__saturate/)?completions/stats-(\d+)\.json$")
+# telemetry-shard{rank}-{epoch}[-{hex}].jsonl; saturate added the hex suffix
+TELEMETRY_RE = re.compile(
+    r"^(?:__saturate/telemetry/)?telemetry-shard(\d+)-(\d+)(?:-[0-9a-f]+)?\.jsonl$"
+)
 
 TICK_WINDOW = 120  # ticks kept per shard in the document (~4 min at 2s/tick)
 
@@ -66,8 +75,12 @@ def status(
     parts = sorted(p for p in rel if PART_RE.match(p))
     manifests = {m.group(1) for p in rel if (m := MANIFEST_RE.match(p))}
     orphans = [p for p in parts if p not in manifests]  # crash window <= flush_every rows
-    markers = sorted(int(m.group(1)) for p in rel if (m := MARKER_RE.match(p)))
-    stats_paths = {int(m.group(1)): p for p in rel if (m := STATS_RE.match(p))}
+    markers = sorted({int(m.group(1)) for p in rel if (m := MARKER_RE.match(p))})
+    # old layout first, so a 0.3 stats file overwrites a 0.2 one for the same rank
+    stats_paths = {}
+    for p in sorted(rel, key=lambda p: p.startswith(f"{SIDECAR_DIR}/")):
+        if m := STATS_RE.match(p):
+            stats_paths[int(m.group(1))] = p
     stats = {
         rank: s
         for rank, p in sorted(stats_paths.items())

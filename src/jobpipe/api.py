@@ -24,6 +24,7 @@ from dataclasses import dataclass
 
 from jobpipe.compiler import CompiledRun, compile
 from jobpipe.spec import TaskSpec
+from jobpipe.templates.embeddings import SATURATE_PIN
 
 PUBLISH_TIMEOUT_S = 60 * 60
 
@@ -69,7 +70,7 @@ class Run:
             f"Dataset.from_generator(gen).push_to_hub({repo_id!r}, private={private})\n"
         )
         shell = (
-            'pip install -q "saturate[hf]" && '
+            f'pip install -q "{SATURATE_PIN}" && '
             f"python3 -c {_sh_quote(code)}"
         )
         api = HfApi(token=token)

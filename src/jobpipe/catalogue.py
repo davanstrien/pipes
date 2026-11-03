@@ -30,7 +30,7 @@ CATALOGUE: dict[str, list[dict]] = {
             # fits a 1540px page + 4096 output) — same split as the uv-scripts
             # SERVING dict this mirrors
             "serving": {
-                "image": "vllm/vllm-openai:latest",
+                "image": "vllm/vllm-openai:v0.33.0",
                 "max_model_len": 8192,
                 "serve_args": ["--limit-mm-per-prompt", '{"image": 1}',
                                "--mm-processor-cache-gb", "0",
