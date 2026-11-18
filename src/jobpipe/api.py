@@ -91,6 +91,20 @@ def _sh_quote(s: str) -> str:
     return shlex.quote(s)
 
 
+def _upload_inputs(uploads, token: str | None) -> None:
+    """Sync local directories to their bucket prefixes (only the chosen file type)."""
+    import sys
+
+    from huggingface_hub import HfApi
+
+    api = HfApi(token=token)
+    for directory, prefix, pattern in uploads:
+        bucket = "/".join(prefix.removeprefix("hf://buckets/").split("/")[:2])
+        api.create_bucket(bucket, private=True, exist_ok=True)
+        print(f"uploading {pattern} from {directory} to {prefix}", file=sys.stderr)
+        api.sync_bucket(directory, prefix, include=[pattern], quiet=True)
+
+
 def _run(spec: TaskSpec, *, launch: bool, token: str | None,
          namespace: str | None, resolution=None) -> Run | CompiledRun:
     compiled = compile(spec, token=token)
@@ -103,6 +117,9 @@ def _run(spec: TaskSpec, *, launch: bool, token: str | None,
     if not launch:
         return compiled
     from jobpipe.launcher import launch as _launch
+
+    if resolution is not None and resolution.uploads:
+        _upload_inputs(resolution.uploads, token)
 
     run_json = _launch(compiled.spec, token=token, namespace=namespace, compiled=compiled)
     return Run(run_json=run_json, spec=compiled.spec)
@@ -120,20 +137,24 @@ def _resolved(task: str, dataset: str, *, token: str | None, verbose: bool, **us
 
 
 def embed(dataset: str, *, model: str | None = None, output: str | None = None,
-          column: str | None = None, engine: str | None = None,
+          column: str | None = None, id_column: str | None = None,
+          keep: list[str] | None = None, max_seq_len: int | None = None,
+          prefix: str | None = None, serve_args: list[str] | None = None,
           flavor: str | None = None, world: int | None = None,
-          batch: int | None = None, limit: int | None = None,
+          limit: int | None = None, timeout: str | None = None,
           config: str | None = None, split: str | None = None,
           launch: bool = True, token: str | None = None,
           namespace: str | None = None, verbose: bool = True) -> Run | CompiledRun:
-    """Embed a dataset. Everything except the dataset id is optional:
-    resolve() fills column/model/engine/flavor/output from the dataset and
-    model metadata (hand defaults where noted) and prints the filled spec
+    """Embed a text column. `dataset` is a Hub dataset id, a bucket glob
+    (hf://buckets/me/b/data/*.parquet; also .jsonl, .csv, .txt, .md) or a local
+    directory (uploaded to a bucket at launch). Everything else is optional:
+    resolve() fills column/id/model/flavor/output and prints the filled spec
     with per-field provenance before anything launches."""
     r = _resolved("embeddings", dataset, token=token, verbose=verbose,
-                  model=model, output=output, column=column, engine=engine,
-                  flavor=flavor, world=world, batch=batch, limit=limit,
-                  config=config, split=split)
+                  model=model, output=output, column=column, id_column=id_column,
+                  keep=keep, max_seq_len=max_seq_len, prefix=prefix,
+                  serve_args=serve_args, flavor=flavor, world=world, limit=limit,
+                  timeout=timeout, config=config, split=split)
     return _run(r.spec, launch=launch, token=token, namespace=namespace, resolution=r)
 
 

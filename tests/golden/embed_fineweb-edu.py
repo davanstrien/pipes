@@ -1,89 +1,166 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["saturate[hf]==0.3.0"]
+# dependencies = ["saturate[hf]==0.3.1"]
 #
 # [tool.hf-jobs]
 # flavor = "a10g-small"
-# image = "ghcr.io/huggingface/text-embeddings-inference:86-latest"
+# image = "vllm/vllm-openai:v0.30.0"
 # secrets = ["HF_TOKEN"]
-# timeout = "4h"
+# timeout = "2h"
 # ///
-"""embed_fineweb-edu — embeddings pipeline compiled by jobpipe (TEI arm).
+"""embed_fineweb-edu — embeddings compiled by jobpipe (vLLM pooling, one text per request).
 
-Source: HuggingFaceFW/fineweb-edu · train/text
-Model:  BAAI/bge-m3 (TEI) · 1 job(s) on a10g-small
+Source: HuggingFaceFW/fineweb-edu
+Model:  BAAI/bge-m3 · 1 job(s) on a10g-small
 Output: hf://buckets/davanstrien/pumpjack/fineweb-edu-bge-m3
-The driver owns the engine: text-embeddings-router boots on :8080
-(health-gated by Engine) and is torn down with the run.
+
+Run it again with the same arguments to resume: rows already written are skipped.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import os
+import sys
+import threading
+import time
+import urllib.request
 
-from saturate import Auto, Engine, dataset_rows, pump
-from saturate.source import shard_select
+SPEC = {'dataset': 'HuggingFaceFW/fineweb-edu',
+ 'config': 'default',
+ 'split': 'train',
+ 'source_format': None,
+ 'column': 'text',
+ 'id_column': 'id',
+ 'keep': ['url'],
+ 'limit': 12800,
+ 'model': 'BAAI/bge-m3',
+ 'prefix': '',
+ 'max_seq_len': 512,
+ 'serve_args': [],
+ 'output': 'hf://buckets/davanstrien/pumpjack/fineweb-edu-bge-m3'}
 
-MODEL = "BAAI/bge-m3"
-OUTPUT = "hf://buckets/davanstrien/pumpjack/fineweb-edu-bge-m3"
-BATCH = 64
-TRUNCATE = 1200  # chars; guards context blowups client-side (--auto-truncate guards tokens)
 
-TEI_CMD = ["text-embeddings-router", "--model-id", MODEL, "--port", "8080",
-           "--max-batch-tokens", "32768", "--max-client-batch-size", "128",
-           "--auto-truncate"]
+def report_memory(every_s: int = 60) -> None:
+    """Print this process's resident memory now and then, to stderr."""
+
+    def loop() -> None:
+        while True:
+            try:
+                with open("/proc/self/status") as status:
+                    for line in status:
+                        if line.startswith("VmRSS"):
+                            megabytes = int(line.split()[1]) // 1024
+                            print(f"[rss] {megabytes} MB", file=sys.stderr, flush=True)
+            except OSError:
+                return
+            time.sleep(every_s)
+
+    threading.Thread(target=loop, daemon=True).start()
 
 
-def batched(rows):
-    # caller-side micro-batching (rows-only boundary); empty texts skipped,
-    # tail batch flushes — a short final batch is data, not a remainder.
-    buf = []
-    for rid, row in rows:
-        text = (row.get("text") or "").strip()
-        if not text:
-            continue
-        buf.append((rid, text[:TRUNCATE]))
-        if len(buf) == BATCH:
-            yield f"b-{buf[0][0]}", {"texts": [t for _, t in buf]}
-            buf = []
-    if buf:
-        yield f"b-{buf[0][0]}", {"texts": [t for _, t in buf]}
+def row_ids():
+    """The `ids` argument for dataset_rows: a column name, or the row's position."""
+    column = SPEC["id_column"]
+    if column is None:
+        return "index"
+    if column in ("index", "content"):
+        # saturate reads these two names as id strategies, so a column with one of
+        # them needs a callable.
+        return lambda example: example[column]
+    return column
+
+
+def source_rows(shard):
+    from saturate import dataset_rows
+
+    columns = [SPEC["column"], *SPEC["keep"]]
+    dataset = SPEC["dataset"]
+    if dataset.startswith("hf://buckets/"):
+        from datasets import load_dataset
+
+        extra = {"sample_by": "document"} if SPEC["source_format"] == "text" else {}
+        loaded = load_dataset(SPEC["source_format"], data_files=dataset, split="train",
+                              streaming=True, **extra)
+        return dataset_rows(loaded, split="train", columns=columns, ids=row_ids(),
+                            limit=SPEC["limit"], shard=shard)
+    return dataset_rows(dataset, config=SPEC["config"], split=SPEC["split"], columns=columns,
+                        ids=row_ids(), limit=SPEC["limit"], shard=shard)
+
+
+def served_max_tokens(endpoint: str) -> int:
+    """The most tokens the server accepts for one text of this model."""
+    with urllib.request.urlopen(f"{endpoint}/models", timeout=60) as response:
+        for entry in json.load(response)["data"]:
+            if entry["id"] == SPEC["model"]:
+                return entry["max_model_len"]
+    sys.exit(f"the server does not list {SPEC['model']}")
+
+
+def keep_value(value):
+    """Kept columns are written as strings; lists and dicts as JSON."""
+    if value is None or isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, default=str)
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--rank", type=int, default=0)
-    ap.add_argument("--world", type=int, default=1)
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--rank", type=int, default=0)
+    parser.add_argument("--world", type=int, default=1)
+    args = parser.parse_args()
+    shard = (args.rank, args.world)
 
     from huggingface_hub import HfApi
 
     HfApi().create_bucket("davanstrien/pumpjack", private=True, exist_ok=True)
 
+    import pyarrow as pa
+    from saturate import Engine, pump
+
+    report_memory()
+    text_column = SPEC["column"]
+    rows = source_rows(shard)
+    rows = ((row_id, row) for row_id, row in rows if (row[text_column] or "").strip())
+    cut = {"tokens": None}  # set once the server reports the model's maximum
+
     def to_request(row: dict) -> dict:
-        return {"model": MODEL, "input": row["texts"]}
+        return {"model": SPEC["model"], "input": SPEC["prefix"] + row[text_column],
+                "truncate_prompt_tokens": cut["tokens"]}
 
     def parse(row: dict, body: dict) -> dict:
-        data = body["data"]
-        if len(data) != len(row["texts"]):  # schema-invalid: never mark as success
-            raise ValueError(f"expected {len(row['texts'])} embeddings, got {len(data)}")
-        return {"texts": row["texts"],
-                "embeddings": [d["embedding"] for d in data],
-                "n_texts": len(data),
-                "prompt_tokens": (body.get("usage") or {}).get("prompt_tokens")}
+        result = {"embedding": body["data"][0]["embedding"], "model": SPEC["model"],
+                  "prompt_tokens": (body.get("usage") or {}).get("prompt_tokens")}
+        for column in SPEC["keep"]:
+            result[column] = keep_value(row.get(column))
+        return result
 
-    rows = dataset_rows("HuggingFaceFW/fineweb-edu", config="default", split="train",
-                        columns=["text"], limit=12800)
-    rows = shard_select(batched(rows), rank=args.rank, world=args.world)
-    with Engine(MODEL, cmd=TEI_CMD, port=8080,
-                ready_route="/embeddings",
-                ready_payload={"model": MODEL, "input": ["ready?"]},
-                ready_accept=lambda r: r.status_code == 200) as endpoint:
-        stats = pump(rows, to_request, parse, endpoint, OUTPUT,
-                     route="/embeddings",
-                     window=Auto(target_waiting=8, initial=4, max_limit=64),
-                     shard=(args.rank, args.world), flush_every=50)
+    # Declared, so a part holding only error rows has the same columns as the rest.
+    schema = pa.schema(
+        [("id", pa.string()), ("error", pa.string()), ("embedding", pa.list_(pa.float32())),
+         ("model", pa.string()), ("prompt_tokens", pa.int64())]
+        + [(column, pa.string()) for column in SPEC["keep"]]
+    )
+    server_args = ["--runner", "pooling", *SPEC["serve_args"]]
+    if SPEC["max_seq_len"]:
+        server_args += ["--max-model-len", str(SPEC["max_seq_len"])]
+    engine = Engine(SPEC["model"], engine="vllm", extra_args=server_args,
+                    ready_route="/embeddings",
+                    ready_payload={"model": SPEC["model"], "input": "ready"})
+    with engine as endpoint:
+        cut["tokens"] = served_max_tokens(endpoint)
+        print(f"texts are cut at {cut['tokens']} tokens", file=sys.stderr, flush=True)
+        started = time.monotonic()
+        stats = pump(rows, to_request, parse, endpoint, SPEC["output"], route="/embeddings",
+                     shard=shard, schema=schema)
+        elapsed = time.monotonic() - started
+    print(f"rank {args.rank}/{args.world}: {stats.rows_processed} ok, {stats.rows_failed} failed, "
+          f"{stats.rows_processed / max(elapsed, 1e-6):.0f} rows/s", file=sys.stderr)
     print(f"EMBED rank={args.rank} " + stats.to_json(), flush=True)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)  # saturate README: avoids the exit hang after a stopped Parquet stream
 
 
 if __name__ == "__main__":

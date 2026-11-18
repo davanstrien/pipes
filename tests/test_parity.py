@@ -17,7 +17,7 @@ RUN_ID = "goldrun1"
 
 
 def golden_spec() -> TaskSpec:
-    return TaskSpec(**json.loads((GOLDEN / "spec_fineweb_tei.json").read_text()))
+    return TaskSpec(**json.loads((GOLDEN / "spec_fineweb.json").read_text()))
 
 
 def test_driver_byte_exact():
@@ -41,9 +41,9 @@ def test_launch_command_matches_console():
 def test_run_json_intent_fields():
     c = compile(golden_spec(), run_id=RUN_ID)
     rj = c.run_json
-    # G1: denominator = ceil(min(limit, num_examples) / batch) = 12800/64
-    assert rj["expected_rows"] == 200
-    assert rj["items_per_row"] == 64  # G4
+    # one text per request: rows == items
+    assert rj["expected_rows"] == 12800
+    assert rj["items_per_row"] == 1
     assert rj["expected_items"] == 12800
     assert rj["world"] == 1  # G2's launch-time cover
     assert rj["jobs"] == [] and rj["created_at"] is None  # launch() fills these
@@ -66,16 +66,29 @@ def test_no_network_when_num_examples_pinned():
     assert called == []
 
 
-def test_vllm_arm_renders():
-    spec = golden_spec().model_copy(update={"engine": "vllm", "world": 4})
+def test_fan_out_renders():
+    spec = golden_spec().model_copy(update={"world": 4})
     c = compile(spec, run_id=RUN_ID)
-    assert "Engine(MODEL, engine=\"vllm\"" in c.driver
-    assert "--runner\", \"pooling\", \"--convert\", \"embed\"" in c.driver
-    # limit lives in the source now (dataset_rows texts cap; N_BATCHES guard gone)
-    assert ", limit=12800)" in c.driver
-    assert 'ap.add_argument("--world", type=int, default=4)' in c.driver
+    assert 'Engine(SPEC["model"], engine="vllm"' in c.driver
+    assert "'limit': 12800" in c.driver  # texts cap, applied before sharding
+    assert 'parser.add_argument("--world", type=int, default=4)' in c.driver
     assert len(c.commands) == 1 + 4  # stage + one launch per rank
     assert "--rank 3 --world 4" in c.commands[-1]
+
+
+def test_spec_values_are_python_literals():
+    # quotes in user text cannot break the driver: values are repr()-quoted
+    spec = golden_spec().model_copy(update={"prefix": 'say "hi"\n', "keep": ["a'b"]})
+    c = compile(spec, run_id=RUN_ID)
+    compile_ok = compile_source(c.driver)
+    assert compile_ok
+
+
+def compile_source(text: str) -> bool:
+    import ast
+
+    ast.parse(text)
+    return True
 
 
 def test_dataset_output_gets_viewer_card():

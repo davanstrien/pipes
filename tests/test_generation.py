@@ -73,5 +73,5 @@ def test_publish_uses_saturate_reader():
 
 def test_embeddings_defaults_unchanged():
     spec = TaskSpec(dataset="a/b", model="m", output="hf://buckets/o/n/p")
-    assert spec.task == "embeddings" and spec.batch == 64
+    assert spec.task == "embeddings" and spec.batch == 1
     assert spec.slug.startswith("embed_")

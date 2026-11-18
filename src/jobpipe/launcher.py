@@ -23,7 +23,6 @@ from jobpipe.spec import TaskSpec
 from jobpipe.templates import get_template
 
 LABEL = "jobpipe"  # bare marker label
-JOB_TIMEOUT_S = 3600
 
 
 def _ensure_output_container(api: HfApi, output: str) -> None:
@@ -77,7 +76,9 @@ def launch(
             command=["bash", "-c", template.job_shell(spec, compiled.driver_name, rank)],
             flavor=spec.flavor,
             secrets={"HF_TOKEN": token or get_token()},
-            timeout=JOB_TIMEOUT_S,
+            # quiet download bars, so a crash's traceback is findable in the logs
+            env={"HF_HUB_DISABLE_PROGRESS_BARS": "1"},
+            timeout=spec.timeout,
             namespace=namespace,
             labels={
                 LABEL: "",

@@ -5,12 +5,17 @@
   "split": "train",
   "column": "text",
   "model": "BAAI/bge-m3",
-  "engine": "tei",
+  "engine": "vllm",
   "flavor": "a10g-small",
   "world": 1,
   "output": "hf://buckets/davanstrien/pumpjack/fineweb-edu-bge-m3",
   "publish": false,
-  "batch": 64,
+  "batch": 1,
   "limit": 12800,
-  "num_examples": 1525223056
+  "num_examples": 1525223056,
+  "id_column": "id",
+  "keep": [
+    "url"
+  ],
+  "max_seq_len": 512
 }

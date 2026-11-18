@@ -108,8 +108,8 @@ def _dump(result, path: str) -> None:
     print(f"  hf jobs uv run --flavor {spec['flavor']}"
           + (f" --image {img}" if img else "")
           + f" -s HF_TOKEN {p}", file=sys.stderr)
-    print("(once huggingface_hub#4598 ships, the flags come from the script's"
-          " own [tool.hf-jobs] header)", file=sys.stderr)
+    print(f"(or `hf jobs uv run -s HF_TOKEN {p}`: the script's own [tool.hf-jobs]"
+          " header carries the flavor, image and timeout)", file=sys.stderr)
 
 
 def _verb(args, fn, **extra) -> int:
@@ -144,7 +144,9 @@ def _verb(args, fn, **extra) -> int:
 def cmd_embed(args) -> int:
     from jobpipe.api import embed
 
-    return _verb(args, embed, engine=args.engine, batch=args.batch)
+    return _verb(args, embed, id_column=args.id_column, keep=args.keep,
+                 max_seq_len=args.max_seq_len, prefix=args.prefix,
+                 serve_args=args.serve_arg, timeout=args.timeout)
 
 
 def cmd_generate(args) -> int:
@@ -281,11 +283,25 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--token")
         p.add_argument("--namespace")
 
-    p = sub.add_parser("embed", help="embed a dataset (zero-config: `ip embed user/ds`)")
+    p = sub.add_parser(
+        "embed",
+        help="embed a text column: Hub dataset, bucket glob or local directory",
+        description="SOURCE is a Hub dataset id, a bucket glob such as "
+        "hf://buckets/me/b/data/*.parquet (.jsonl, .csv, .txt, .md too), or a local "
+        "directory (its files are uploaded to a bucket at launch).",
+    )
     _verb_args(p, model_required=False)
-    p.add_argument("--engine", choices=["vllm", "tei"],
-                   help="default: detected from model_type (encoder -> tei)")
-    p.add_argument("--batch", type=int)
+    p.add_argument("--id-column", help="column to use as the row id "
+                   "(default: 'id' if the dataset has one, else the row position)")
+    p.add_argument("--keep", nargs="+", metavar="COLUMN",
+                   help="source columns to copy into the output")
+    p.add_argument("--max-seq-len", type=int,
+                   help="tokens per text (default: from the catalogue, else the model maximum)")
+    p.add_argument("--prefix", help="text to put before every input, e.g. 'passage: '")
+    p.add_argument("--serve-arg", action="append", metavar="FLAG",
+                   help="extra `vllm serve` flag; repeat for each token, "
+                   "e.g. --serve-arg=--gpu-memory-utilization --serve-arg=0.9")
+    p.add_argument("--timeout", help="per Job, e.g. 30m or 4h (default 2h)")
     p.set_defaults(fn=cmd_embed)
 
     p = sub.add_parser("generate", help="prompt-in-column generation (verb over run)")

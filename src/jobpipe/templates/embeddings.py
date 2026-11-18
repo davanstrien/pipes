@@ -1,43 +1,41 @@
 """Embeddings template: TaskSpec -> driver .py + launch commands.
 
-Modernized 2026-07-30 (console-session steer): saturate imports (the library
-renamed from pumpjack on 2026-07-29), `dataset_rows` streaming source instead
-of a hand-rolled `load_dataset` loop, engine lifecycle owned by the driver
-(TEI included, via Engine(cmd=...)), and PyPI install — saturate 0.1.1 is
-live, the wheel-curl scaffolding is gone. Presets keep their receipts:
+Refreshed 2026-11-18. The driver serves the model with vLLM (`--runner pooling`) and
+sends one text per request through saturate; vLLM batches the requests on the GPU.
+This is the arrangement of the uv-scripts recipe `generate-embeddings-saturate.py`
+(2026-11-10, A10G, 20k IMDb texts: bge-m3 276 rows/s, Qwen3-Embedding-0.6B 187 rows/s).
 
-Serving-arm rule (which engine to default to lives in introspect.py):
-- decoder-style embedding model -> vLLM and TEI are a tie at the GPU compute
-  ceiling: Qwen3-Embedding-0.6B on a10g-small, identical 400x64-text workload,
-  vLLM pooling 37.8k tok/s vs TEI 36.9k (2.3% apart; jobs 6a68b9fc / 6a68bbfc).
-  Default vLLM (one image serves every model family).
-- classic encoder (BERT-family) -> TEI wins clearly: BAAI/bge-m3, identical
-  25,600-text workload, TEI 63.0k tok/s vs vLLM 53.4k (+18%; jobs
-  6a68c171a9f4 / 6a68c18115e8).
-- NO reranker template yet: TEI's native /rerank returns a bare JSON array,
-  which saturate's transport (JSON-object assumption) turns into 100% durable
-  error rows (job 6a68c17115e8). Known gap; vLLM /score works.
+What changed from the July template:
+- One text per request, not batches of 64. Each output row is one input row, with
+  its own id (a source column, or saturate's position id) and any kept columns.
+- vLLM only. TEI was 18% faster on bge-m3 in July, but saturate 0.3.1 counts TEI's
+  capacity in the wrong unit for batch rows, and the TEI image has no uv.
+- Texts are cut in tokens by the server (`truncate_prompt_tokens`), not in characters.
+- float32 embeddings (the July output was float64, twice the size).
+- Input can be a Hub dataset or a bucket glob of parquet/json/csv/text files.
+- The driver logs its resident memory every minute (the August run lost ranks to
+  memory growth of about 2.4 KB per source row), and exits with os._exit(0)
+  after success (saturate README: avoids the exit hang after a Parquet stream).
 
-Scale receipt: the same driver at world=1 vs world=4 (200k fineweb-edu texts,
-a10g-small) went 163 -> 633 texts/s, 3.81x, ~$1.70/M texts, with a 22-line
-driver diff — fan-out is shard_select (strided then; a hash of the row id
-since saturate 0.3), no coordinator.
-
-Micro-batching stays caller-side deliberately (rows-only boundary): the
-inline `batched()` in the driver is the missing `saturate.source.batched`
-combinator (upstream ask, saturate#18). Batch ids are `b-{first-member-id}`
-— resume-stable, no counter.
+Fan-out: `world` Jobs read the same input; each keeps the rows whose id hashes to
+its rank (saturate shard_of). Every rank still streams the whole input.
 """
 
 from __future__ import annotations
 
+import pprint
 import re
 
 from jobpipe.spec import TaskSpec
 
 # [hf] extra = huggingface_hub (hf:// output) + datasets (dataset_rows).
 # Exact pin: saturate 0.x minor releases can change the output layout.
-SATURATE_PIN = "saturate[hf]==0.3.0"
+SATURATE_PIN = "saturate[hf]==0.3.1"
+
+# Exact tag: `latest` moves with each vLLM release. Generation and OCR use this one.
+VLLM_IMAGE = "vllm/vllm-openai:v0.33.0"
+# Embeddings: the tag the uv-scripts recipe and the 2026-11-18 smoke run used.
+EMBED_IMAGE = "vllm/vllm-openai:v0.30.0"
 
 
 def staging_repo(spec: TaskSpec) -> str:
@@ -47,193 +45,148 @@ def staging_repo(spec: TaskSpec) -> str:
     stripped = re.sub(r"^hf://(datasets|buckets)/", "", spec.output)
     return f"{stripped.split('/')[0]}/jobpipe-staging"
 
-# TEI image tag follows the GPU architecture; a10g's 86 tag is the proven one
-# (86-latest carried both the decoder tie and the +18% encoder win above).
-TEI_IMAGES = {
-    "t4-small": "turing-latest",
-    "a10g-small": "86-latest",
-    "a10g-large": "86-latest",
-    "l4x1": "89-latest",
-    "l40sx1": "89-latest",
-}
-
-# Exact tag: `latest` moves with each vLLM release (v0.33.0 = latest on 2026-11-03).
-VLLM_IMAGE = "vllm/vllm-openai:v0.33.0"
-
-# vLLM pooling flags: the 32k-text spike (500/500 rows, 7.85M tokens, 33.5k
-# tok/s, spikes/RESULTS.md). `--task embed` is gone upstream; current form is
-# `--runner pooling --convert embed` — flag churn found by that spike.
-VLLM_ENGINE_ARGS = [
-    "--runner", "pooling", "--convert", "embed",
-    "--max-num-seqs", "256", "--gpu-memory-utilization", "0.90",
-]
-
-# Units warning (gap G4): with batched texts a contract "row" is one request of
-# `batch` items. The 32k-text spike settled at final_limit=2 REQUESTS — i.e.
-# ~128 texts in flight. Neither window values nor advisor hints are
-# items-normalized; run.json's items_per_row is how readers recover the factor.
-
-# Window preset: Auto(target_waiting=8, initial=4, max_limit=64) + flush_every=50
-# carried every embed run above (32k spike, 4-job fan-out, TEI A/Bs) unchanged.
-
-
-def tei_image(flavor: str) -> str:
-    return f"ghcr.io/huggingface/text-embeddings-inference:{TEI_IMAGES.get(flavor, 'latest')}"
-
 
 def _render(template: str, subs: dict[str, str]) -> str:
     return re.sub(r"\{\{(\w+)\}\}", lambda m: subs[m.group(1)], template)
 
 
-# ---------------------------------------------------------------------------
-# drivers — saturate-native; the parity test pins the TEI arm against
-# tests/golden (regenerated 2026-07-30, provenance in REGEN.md).
-# ---------------------------------------------------------------------------
+_DRIVER = '''"""{{slug}} — embeddings compiled by jobpipe (vLLM pooling, one text per request).
 
-_DRIVER_TEI = '''"""{{slug}} — embeddings pipeline compiled by jobpipe (TEI arm).
-
-Source: {{dataset}} · {{split}}/{{column}}
-Model:  {{model}} (TEI) · {{world}} job(s) on {{flavor}}
+Source: {{dataset}}
+Model:  {{model}} · {{world}} job(s) on {{flavor}}
 Output: {{output}}
-The driver owns the engine: text-embeddings-router boots on :8080
-(health-gated by Engine) and is torn down with the run.
+
+Run it again with the same arguments to resume: rows already written are skipped.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import os
+import sys
+import threading
+import time
+import urllib.request
 
-from saturate import Auto, Engine, dataset_rows, pump
-from saturate.source import shard_select
-
-MODEL = "{{model}}"
-OUTPUT = "{{output}}"
-BATCH = {{batch}}
-TRUNCATE = 1200  # chars; guards context blowups client-side (--auto-truncate guards tokens)
-
-TEI_CMD = ["text-embeddings-router", "--model-id", MODEL, "--port", "8080",
-           "--max-batch-tokens", "32768", "--max-client-batch-size", "128",
-           "--auto-truncate"]
+SPEC = {{spec_literal}}
 
 
-def batched(rows):
-    # caller-side micro-batching (rows-only boundary); empty texts skipped,
-    # tail batch flushes — a short final batch is data, not a remainder.
-    buf = []
-    for rid, row in rows:
-        text = (row.get("{{column}}") or "").strip()
-        if not text:
-            continue
-        buf.append((rid, text[:TRUNCATE]))
-        if len(buf) == BATCH:
-            yield f"b-{buf[0][0]}", {"texts": [t for _, t in buf]}
-            buf = []
-    if buf:
-        yield f"b-{buf[0][0]}", {"texts": [t for _, t in buf]}
+def report_memory(every_s: int = 60) -> None:
+    """Print this process's resident memory now and then, to stderr."""
+
+    def loop() -> None:
+        while True:
+            try:
+                with open("/proc/self/status") as status:
+                    for line in status:
+                        if line.startswith("VmRSS"):
+                            megabytes = int(line.split()[1]) // 1024
+                            print(f"[rss] {megabytes} MB", file=sys.stderr, flush=True)
+            except OSError:
+                return
+            time.sleep(every_s)
+
+    threading.Thread(target=loop, daemon=True).start()
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--rank", type=int, default=0)
-    ap.add_argument("--world", type=int, default={{world}})
-    args = ap.parse_args()
-{{repo_line}}
-    def to_request(row: dict) -> dict:
-        return {"model": MODEL, "input": row["texts"]}
-
-    def parse(row: dict, body: dict) -> dict:
-        data = body["data"]
-        if len(data) != len(row["texts"]):  # schema-invalid: never mark as success
-            raise ValueError(f"expected {len(row['texts'])} embeddings, got {len(data)}")
-        return {"texts": row["texts"],
-                "embeddings": [d["embedding"] for d in data],
-                "n_texts": len(data),
-                "prompt_tokens": (body.get("usage") or {}).get("prompt_tokens")}
-
-    rows = dataset_rows("{{dataset}}", config="{{config}}", split="{{split}}",
-                        columns=["{{column}}"]{{limit_arg}})
-    rows = shard_select(batched(rows), rank=args.rank, world=args.world)
-    with Engine(MODEL, cmd=TEI_CMD, port=8080,
-                ready_route="/embeddings",
-                ready_payload={"model": MODEL, "input": ["ready?"]},
-                ready_accept=lambda r: r.status_code == 200) as endpoint:
-        stats = pump(rows, to_request, parse, endpoint, OUTPUT,
-                     route="/embeddings",
-                     window=Auto(target_waiting=8, initial=4, max_limit=64),
-                     shard=(args.rank, args.world), flush_every=50)
-    print(f"EMBED rank={args.rank} " + stats.to_json(), flush=True)
+def row_ids():
+    """The `ids` argument for dataset_rows: a column name, or the row's position."""
+    column = SPEC["id_column"]
+    if column is None:
+        return "index"
+    if column in ("index", "content"):
+        # saturate reads these two names as id strategies, so a column with one of
+        # them needs a callable.
+        return lambda example: example[column]
+    return column
 
 
-if __name__ == "__main__":
-    main()
-'''
+def source_rows(shard):
+    from saturate import dataset_rows
 
-_DRIVER_VLLM = '''"""{{slug}} — embeddings pipeline compiled by jobpipe (vLLM pooling).
+    columns = [SPEC["column"], *SPEC["keep"]]
+    dataset = SPEC["dataset"]
+    if dataset.startswith("hf://buckets/"):
+        from datasets import load_dataset
 
-Source: {{dataset}} · {{split}}/{{column}}
-Model:  {{model}} (vLLM pooling) · {{world}} job(s) on {{flavor}}
-Output: {{output}}
-"""
-
-from __future__ import annotations
-
-import argparse
-
-from saturate import Auto, Engine, dataset_rows, pump
-from saturate.source import shard_select
-
-MODEL = "{{model}}"
-OUTPUT = "{{output}}"
-BATCH = {{batch}}
-TRUNCATE = 1200  # chars; guards model max-len client-side
-
-VLLM_ARGS = ["--runner", "pooling", "--convert", "embed",
-             "--max-num-seqs", "256", "--gpu-memory-utilization", "0.90"]
+        extra = {"sample_by": "document"} if SPEC["source_format"] == "text" else {}
+        loaded = load_dataset(SPEC["source_format"], data_files=dataset, split="train",
+                              streaming=True, **extra)
+        return dataset_rows(loaded, split="train", columns=columns, ids=row_ids(),
+                            limit=SPEC["limit"], shard=shard)
+    return dataset_rows(dataset, config=SPEC["config"], split=SPEC["split"], columns=columns,
+                        ids=row_ids(), limit=SPEC["limit"], shard=shard)
 
 
-def batched(rows):
-    # caller-side micro-batching (rows-only boundary); empty texts skipped,
-    # tail batch flushes — a short final batch is data, not a remainder.
-    buf = []
-    for rid, row in rows:
-        text = (row.get("{{column}}") or "").strip()
-        if not text:
-            continue
-        buf.append((rid, text[:TRUNCATE]))
-        if len(buf) == BATCH:
-            yield f"b-{buf[0][0]}", {"texts": [t for _, t in buf]}
-            buf = []
-    if buf:
-        yield f"b-{buf[0][0]}", {"texts": [t for _, t in buf]}
+def served_max_tokens(endpoint: str) -> int:
+    """The most tokens the server accepts for one text of this model."""
+    with urllib.request.urlopen(f"{endpoint}/models", timeout=60) as response:
+        for entry in json.load(response)["data"]:
+            if entry["id"] == SPEC["model"]:
+                return entry["max_model_len"]
+    sys.exit(f"the server does not list {SPEC['model']}")
+
+
+def keep_value(value):
+    """Kept columns are written as strings; lists and dicts as JSON."""
+    if value is None or isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, default=str)
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--rank", type=int, default=0)
-    ap.add_argument("--world", type=int, default={{world}})
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--rank", type=int, default=0)
+    parser.add_argument("--world", type=int, default={{world}})
+    args = parser.parse_args()
+    shard = (args.rank, args.world)
 {{repo_line}}
+    import pyarrow as pa
+    from saturate import Engine, pump
+
+    report_memory()
+    text_column = SPEC["column"]
+    rows = source_rows(shard)
+    rows = ((row_id, row) for row_id, row in rows if (row[text_column] or "").strip())
+    cut = {"tokens": None}  # set once the server reports the model's maximum
+
     def to_request(row: dict) -> dict:
-        return {"model": MODEL, "input": row["texts"]}
+        return {"model": SPEC["model"], "input": SPEC["prefix"] + row[text_column],
+                "truncate_prompt_tokens": cut["tokens"]}
 
     def parse(row: dict, body: dict) -> dict:
-        data = body["data"]
-        if len(data) != len(row["texts"]):  # schema-invalid: never mark as success
-            raise ValueError(f"expected {len(row['texts'])} embeddings, got {len(data)}")
-        return {"texts": row["texts"],
-                "embeddings": [d["embedding"] for d in data],
-                "n_texts": len(data),
-                "prompt_tokens": (body.get("usage") or {}).get("prompt_tokens")}
+        result = {"embedding": body["data"][0]["embedding"], "model": SPEC["model"],
+                  "prompt_tokens": (body.get("usage") or {}).get("prompt_tokens")}
+        for column in SPEC["keep"]:
+            result[column] = keep_value(row.get(column))
+        return result
 
-    rows = dataset_rows("{{dataset}}", config="{{config}}", split="{{split}}",
-                        columns=["{{column}}"]{{limit_arg}})
-    rows = shard_select(batched(rows), rank=args.rank, world=args.world)
-    with Engine(MODEL, engine="vllm", extra_args=VLLM_ARGS) as endpoint:
-        stats = pump(rows, to_request, parse, endpoint, OUTPUT,
-                     route="/embeddings",
-                     window=Auto(target_waiting=8, initial=4, max_limit=64),
-                     shard=(args.rank, args.world), flush_every=50)
+    # Declared, so a part holding only error rows has the same columns as the rest.
+    schema = pa.schema(
+        [("id", pa.string()), ("error", pa.string()), ("embedding", pa.list_(pa.float32())),
+         ("model", pa.string()), ("prompt_tokens", pa.int64())]
+        + [(column, pa.string()) for column in SPEC["keep"]]
+    )
+    server_args = ["--runner", "pooling", *SPEC["serve_args"]]
+    if SPEC["max_seq_len"]:
+        server_args += ["--max-model-len", str(SPEC["max_seq_len"])]
+    engine = Engine(SPEC["model"], engine="vllm", extra_args=server_args,
+                    ready_route="/embeddings",
+                    ready_payload={"model": SPEC["model"], "input": "ready"})
+    with engine as endpoint:
+        cut["tokens"] = served_max_tokens(endpoint)
+        print(f"texts are cut at {cut['tokens']} tokens", file=sys.stderr, flush=True)
+        started = time.monotonic()
+        stats = pump(rows, to_request, parse, endpoint, SPEC["output"], route="/embeddings",
+                     shard=shard, schema=schema)
+        elapsed = time.monotonic() - started
+    print(f"rank {args.rank}/{args.world}: {stats.rows_processed} ok, {stats.rows_failed} failed, "
+          f"{stats.rows_processed / max(elapsed, 1e-6):.0f} rows/s", file=sys.stderr)
     print(f"EMBED rank={args.rank} " + stats.to_json(), flush=True)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)  # saturate README: avoids the exit hang after a stopped Parquet stream
 
 
 if __name__ == "__main__":
@@ -276,25 +229,37 @@ def _out_repo_line(spec: TaskSpec) -> str:
     )
 
 
+def _spec_literal(spec: TaskSpec) -> str:
+    """The values the driver needs, as a Python literal (repr-quoted, so any text is safe)."""
+    values = {
+        "dataset": spec.dataset,
+        "config": spec.config,
+        "split": spec.split,
+        "source_format": spec.source_format,
+        "column": spec.column,
+        "id_column": spec.id_column,
+        "keep": list(spec.keep),
+        "limit": spec.expected_items,
+        "model": spec.model,
+        "prefix": spec.prefix,
+        "max_seq_len": spec.max_seq_len,
+        "serve_args": list(spec.serve_args),
+        "output": spec.output,
+    }
+    return pprint.pformat(values, sort_dicts=False, width=96)
+
+
 def driver(spec: TaskSpec) -> str:
-    template = _DRIVER_TEI if spec.engine == "tei" else _DRIVER_VLLM
-    # limit lives in the source as a texts cap (steer: kills the derived
-    # N_BATCHES guard); expected_items folds spec.limit and the viewer count.
-    limit_arg = f", limit={spec.expected_items}" if spec.expected_items else ""
     return _render(
-        template,
+        _DRIVER,
         {
             "slug": spec.slug,
             "dataset": spec.dataset,
-            "config": spec.config,
-            "split": spec.split,
-            "column": spec.column,
             "model": spec.model,
             "flavor": spec.flavor,
             "output": spec.output,
             "world": str(spec.world),
-            "batch": str(spec.batch),
-            "limit_arg": limit_arg,
+            "spec_literal": _spec_literal(spec),
             "repo_line": _out_repo_line(spec),
         },
     )
@@ -308,34 +273,18 @@ def driver(spec: TaskSpec) -> str:
 
 def job_shell(spec: TaskSpec, driver_filename: str, rank: int) -> str:
     """The bash payload for one rank's job — identical text in the printed
-    command and in the API launch (one delivery mode: staged driver)."""
+    command and in the API launch (one delivery mode: staged driver).
+    `uv run` installs the driver's PEP 723 dependencies; `vllm` comes from the image."""
     base = f"https://huggingface.co/datasets/{staging_repo(spec)}/resolve/main"
-    fetch_run = (
-        f'curl -sL -H "Authorization: Bearer $HF_TOKEN" {base}/{driver_filename}'
-        " -o /tmp/run.py"
-    )
-    if spec.engine == "tei":
-        # TEI image has no usable python/pip — uv brings a managed 3.12
-        # (learned from failed jobs on 2026-07-28; the router now boots inside
-        # the driver via Engine(cmd=...), so the shell only installs and runs).
-        return (
-            "set -e\n"
-            "curl -LsSf https://astral.sh/uv/install.sh | sh > /dev/null 2>&1\n"
-            'export PATH="$HOME/.local/bin:$PATH"\n'
-            "uv venv /tmp/venv --python 3.12 > /dev/null\n"
-            f'uv pip install -q --python /tmp/venv/bin/python "{SATURATE_PIN}"\n'
-            f"{fetch_run}\n"
-            f"/tmp/venv/bin/python /tmp/run.py --rank {rank} --world {spec.world}"
-        )
     return (
-        f'pip install -q "{SATURATE_PIN}" && '
-        f"{fetch_run} && "
-        f"python3 /tmp/run.py --rank {rank} --world {spec.world}"
+        f'curl -sfL -H "Authorization: Bearer $HF_TOKEN" {base}/{driver_filename}'
+        " -o /tmp/run.py && "
+        f"uv run /tmp/run.py --rank {rank} --world {spec.world}"
     )
 
 
 def image(spec: TaskSpec) -> str:
-    return tei_image(spec.flavor) if spec.engine == "tei" else VLLM_IMAGE
+    return EMBED_IMAGE
 
 
 def stage_command(spec: TaskSpec, driver_filename: str) -> str:
@@ -344,22 +293,12 @@ def stage_command(spec: TaskSpec, driver_filename: str) -> str:
 
 
 def launch_commands(spec: TaskSpec, driver_filename: str) -> list[str]:
-    cmds = []
-    for rank in range(spec.world):
-        shell = job_shell(spec, driver_filename, rank)
-        if spec.engine == "tei":
-            # printed form: `set -e` folds into the quoted bash -c body
-            body = shell.removeprefix("set -e\n")
-            cmds.append(
-                f"hf jobs run --flavor {spec.flavor} --secrets HF_TOKEN \\\n"
-                f"  {image(spec)} \\\n  bash -c 'set -e\n{body}'"
-            )
-        else:
-            cmds.append(
-                f"hf jobs run --flavor {spec.flavor} --secrets HF_TOKEN \\\n"
-                f"  {image(spec)} \\\n  bash -c '{shell}'"
-            )
-    return cmds
+    return [
+        f"hf jobs run --flavor {spec.flavor} --timeout {spec.timeout} --secrets HF_TOKEN \\\n"
+        f"  -e HF_HUB_DISABLE_PROGRESS_BARS=1 {image(spec)} \\\n"
+        f"  bash -c '{job_shell(spec, driver_filename, rank)}'"
+        for rank in range(spec.world)
+    ]
 
 
 def publish_command(spec: TaskSpec, owner: str) -> str:

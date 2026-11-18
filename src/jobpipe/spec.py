@@ -44,6 +44,15 @@ class TaskSpec(BaseModel):
     # translation-only (TranslateGemma-style models)
     source_lang: str = "en"
     target_lang: str | None = None
+    # embeddings: row identity, kept columns and text handling
+    id_column: str | None = None  # None = saturate's position id
+    keep: list[str] = Field(default_factory=list)  # source columns copied to the output
+    max_seq_len: int | None = None  # tokens per text; None = the model's maximum
+    prefix: str = ""  # put before every text (retrieval models with doc prompts)
+    serve_args: list[str] = Field(default_factory=list)  # extra `vllm serve` flags
+    # bucket input format, for hf://buckets/... sources (parquet, json, csv, text)
+    source_format: str | None = None
+    timeout: str = "2h"  # per Job (Jobs syntax: "30m", "2h")
 
     @model_validator(mode="after")
     def _task_rules(self) -> TaskSpec:
@@ -74,17 +83,26 @@ class TaskSpec(BaseModel):
             if self.engine != "vllm":
                 raise ValueError(f"{self.task} currently supports engine='vllm' only")
             self.batch = 1
-        elif self.batch is None:
-            self.batch = 64
+        else:  # embeddings: one text per request; vLLM batches server-side
+            if self.engine != "vllm":
+                raise ValueError(
+                    "embeddings run on vLLM only (TEI cannot be driven per text "
+                    "with saturate 0.3.1, and its image has no uv)"
+                )
+            if self.batch not in (None, 1):
+                raise ValueError("embeddings send one text per request (batch=1)")
+            self.batch = 1
         if self.task == "translation" and not self.target_lang:
             raise ValueError("translation requires target_lang (ISO 639-1, e.g. 'de')")
         return self
 
     @property
     def slug(self) -> str:
-        if self.task == "ocr":  # dataset carries a bucket glob, not a repo id
+        if self.dataset.startswith("hf://buckets/"):  # a bucket glob, not a repo id
             parts = self.dataset.removeprefix("hf://buckets/").split("/")
             name = parts[1] if len(parts) > 1 else (parts[0] or "bucket")
+            if name == "jobpipe-inputs" and len(parts) > 2:  # an uploaded local directory
+                name = parts[2]
         else:
             name = (self.dataset.split("/")[1] if "/" in self.dataset else "ds") or "ds"
         name = re.sub(r"[^a-z0-9-]+", "-", name.lower())

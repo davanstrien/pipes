@@ -10,7 +10,7 @@ from jobpipe import TaskSpec
 
 def base(**over):
     d = dict(task="embeddings", dataset="org/my-set", model="BAAI/bge-m3",
-             engine="tei", output="hf://buckets/org/b/out")
+             output="hf://buckets/org/b/out")
     d.update(over)
     return TaskSpec(**d)
 
@@ -27,10 +27,10 @@ def test_slug():
 
 
 def test_expected_rows_denominator():
-    # ceil(min(limit, num_examples) / batch) — the console's batchCap
-    assert base(limit=12800, num_examples=10**9).expected_rows == 200
-    assert base(limit=None, num_examples=100).expected_rows == 2
-    assert base(limit=65, num_examples=None).expected_rows == 2
+    # one text per request: rows == min(limit, num_examples)
+    assert base(limit=12800, num_examples=10**9).expected_rows == 12800
+    assert base(limit=None, num_examples=100).expected_rows == 100
+    assert base(limit=65, num_examples=None).expected_rows == 65
     assert base(limit=None, num_examples=None).expected_rows is None
 
 
@@ -41,6 +41,12 @@ def test_validation():
         base(world=0)
     with pytest.raises(ValidationError):
         base(flavor="h100-mega")  # not in the proven flavor set
+    with pytest.raises(ValidationError):
+        base(engine="tei")  # embeddings are vLLM only
+    with pytest.raises(ValidationError):
+        base(batch=64)  # one text per request
+    assert base(dataset="hf://buckets/me/b/data/*.parquet").slug == "embed_b"
+    assert base(dataset="hf://buckets/me/jobpipe-inputs/notes/**/*.txt").slug == "embed_notes"
 
 
 def test_json_schema_exports():

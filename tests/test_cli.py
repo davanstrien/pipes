@@ -20,10 +20,10 @@ def test_zero_config_compile_only(monkeypatch, capsys):
     _stub(monkeypatch)
     assert main(["embed", "org/ds", "--compile-only"]) == 0
     out, err = capsys.readouterr()
-    # driver on stdout: TEI arm (encoder), auto-named output, PEP 723 header
+    # driver on stdout: vLLM pooling, auto-named bucket output, PEP 723 header
     assert "# /// script" in out and "[tool.hf-jobs]" in out
-    assert "text-embeddings-router" in out
-    assert "hf://datasets/tester/ds-embeddings/data" in out
+    assert '"--runner", "pooling"' in out
+    assert "hf://buckets/tester/jobpipe-outputs/ds-embeddings" in out
     # provenance receipts on stderr
     assert "resolved embeddings spec" in err
     assert "[default]" in err and "[detected]" in err

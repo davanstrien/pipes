@@ -47,10 +47,9 @@ def _script_header(spec: TaskSpec, template) -> str:
     driver. Makes the staged artifact a self-describing uv script: deps pin
     saturate (already-emitted drivers never rot against saturate main), and
     the hf-jobs table carries the job config so `hf jobs uv run <driver>`
-    needs zero flags once huggingface_hub#4598 lands (plain uv ignores
-    unknown tool tables — verified during that PR's review). Until then the
-    launch commands below remain the working path; the header is the eject
-    contract."""
+    needs zero flags (huggingface_hub#4598 has shipped; plain uv ignores
+    unknown tool tables). The header's timeout is the spec's, the same value
+    the launcher passes."""
     secrets = 'secrets = ["HF_TOKEN"]'
     return (
         "# /// script\n"
@@ -61,7 +60,7 @@ def _script_header(spec: TaskSpec, template) -> str:
         f'# flavor = "{spec.flavor}"\n'
         f'# image = "{template.image(spec)}"\n'
         f"# {secrets}\n"
-        '# timeout = "4h"\n'
+        f'# timeout = "{spec.timeout}"\n'
         "# ///\n"
     )
 

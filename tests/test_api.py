@@ -19,13 +19,13 @@ def _no_network(monkeypatch):
 
 def test_embed_compiles_without_launch(monkeypatch):
     _no_network(monkeypatch)
-    c = embed("HuggingFaceFW/fineweb-edu", model="BAAI/bge-m3", engine="tei",
+    c = embed("HuggingFaceFW/fineweb-edu", model="BAAI/bge-m3",
               output="hf://buckets/me/out", limit=12800, launch=False)
-    assert c.spec.task == "embeddings" and c.spec.batch == 64
-    assert c.run_json["items_per_row"] == 64
-    # router lifecycle moved into the driver (Engine(cmd=...)), 2026-07-30
-    assert "text-embeddings-router" in c.driver
-    assert 'saturate[hf]' in c.commands[-1]  # PyPI install, no wheel-curl
+    assert c.spec.task == "embeddings" and c.spec.batch == 1
+    assert c.run_json["items_per_row"] == 1
+    assert '"--runner", "pooling"' in c.driver
+    assert "uv run /tmp/run.py" in c.commands[-1]  # deps from the PEP 723 header
+    assert 'saturate[hf]==' in c.driver
     assert c.driver_name.startswith("embed_fineweb-edu-")
 
 
@@ -40,7 +40,7 @@ def test_generate_compiles_without_launch(monkeypatch):
 
 def test_run_handle_surfaces(monkeypatch):
     _no_network(monkeypatch)
-    c = embed("a/b", model="BAAI/bge-m3", engine="tei",
+    c = embed("a/b", model="BAAI/bge-m3",
               output="hf://buckets/me/out", launch=False)
     run = Run(run_json={**c.run_json, "jobs": [{"rank": 0, "id": "j1"}]}, spec=c.spec)
     assert run.run_id == c.run_json["run_id"]
@@ -50,7 +50,7 @@ def test_run_handle_surfaces(monkeypatch):
 
 def test_publish_shell_shape(monkeypatch):
     _no_network(monkeypatch)
-    c = embed("a/b", model="BAAI/bge-m3", engine="tei",
+    c = embed("a/b", model="BAAI/bge-m3",
               output="hf://buckets/me/out", launch=False)
     run = Run(run_json=c.run_json, spec=c.spec)
     captured = {}

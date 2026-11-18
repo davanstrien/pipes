@@ -51,23 +51,29 @@ CATALOGUE: dict[str, list[dict]] = {
     "embeddings": [
         {
             "model": "BAAI/bge-m3",
-            "engine": "tei",
-            "why": "multilingual all-rounder; encoder -> TEI (+18% vs vLLM receipt)",
+            "engine": "vllm",
+            "why": "multilingual all-rounder (100+ languages, 1024-d)",
             "prompts": None,  # card explicitly: no instruction needed, either side
+            "serving": {"flavor": "a10g-small", "max_seq_len": 512, "prefix": ""},
             "receipts": [
-                {"date": "2026-07-30", "job": "6a6b1603b36a6516e96a243c",
-                 "note": "zero-config fka/prompts.chat: 2,112 texts, 37.6k tok/s, 0 failed"},
+                {"date": "2026-11-18", "job": "6afdb3b7e41aae15936c7aab",
+                 "note": "europeana_newspapers 2,000 pages over 2 Jobs, 512-token cut: "
+                         "0 failed, 44-46k tok/s per A10G"},
+                {"date": "2026-11-10", "job": "emb-ab-20261110",
+                 "note": "20k IMDb texts, one A10G, one text per request: 276 rows/s"},
                 {"date": "2026-07-28", "job": "6a68c171a9f4",
-                 "note": "25.6k-text TEI-vs-vLLM A/B: TEI 63.0k tok/s (+18%)"},
+                 "note": "25.6k-text A/B: TEI 63.0k vs vLLM 53.4k tok/s (TEI dropped)"},
             ],
         },
         {
             "model": "Qwen/Qwen3-Embedding-0.6B",
             "engine": "vllm",
-            "why": "decoder-style, strong retrieval; vLLM/TEI tie at GPU ceiling",
+            "why": "decoder-style, strong retrieval; documents need no prompt",
+            "prompts": None,  # documents: none; queries use the registered "query" prompt
+            "serving": {"flavor": "a10g-small", "max_seq_len": 512, "prefix": ""},
             "receipts": [
-                {"date": "2026-07-30", "job": "6a6b161bb36a6516e96a2440",
-                 "note": "10,048 imdb texts, 34.4k tok/s, 0 failed"},
+                {"date": "2026-11-10", "job": "emb-ab-20261110",
+                 "note": "20k IMDb texts, one A10G, one text per request: 187 rows/s"},
                 {"date": "2026-07-28", "job": "6a68b9fc",
                  "note": "400x64-text A/B: vLLM pooling 37.8k vs TEI 36.9k tok/s"},
             ],
