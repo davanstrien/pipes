@@ -44,7 +44,7 @@ class Resolution:
                 continue
             val = getattr(self.spec, f)
             note = self.notes.get(f)
-            lines.append(f"  {f:<8} {val!r:<44} [{self.provenance[f]}]"
+            lines.append(f"  {f:<11} {val!r:<44} [{self.provenance[f]}]"
                          + (f"  {note}" if note else ""))
         return "\n".join(lines)
 
@@ -302,7 +302,7 @@ def _resolve_embed_bucket(dataset, user, prov, notes, vals, token, uploads) -> R
         prov["model"] = "curated"
         notes["model"] = entry["why"]
     vals["engine"] = "vllm"
-    prov["engine"] = "default"
+    prov["engine"] = "curated" if entry is not None else "default"
     serving = (entry or {}).get("serving", {})
     if "flavor" in user:
         vals["flavor"] = user["flavor"]

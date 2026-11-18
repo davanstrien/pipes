@@ -340,6 +340,10 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(fn=cmd_catalogue)
 
     args = ap.parse_args(argv)
+    # Hub upload bars (driver staging, local-directory sync) drown the provenance block.
+    from huggingface_hub.utils import disable_progress_bars
+
+    disable_progress_bars()
     return args.fn(args)
 
 
