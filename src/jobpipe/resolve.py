@@ -277,9 +277,11 @@ def resolve_embed(
 
     recipe = RECIPES["embed"]
     if recipe_url:
+        location = recipe_url
         put("recipe", recipe_url, "user")
     else:
-        put("recipe", script_path(recipe), "default",
+        location = script_path(recipe)
+        put("recipe", f"scripts/{recipe.script}", "default",
             "jobpipe's copy of uv-scripts generate-embeddings-saturate.py")
 
     total = None
@@ -314,7 +316,7 @@ def resolve_embed(
 
     return Plan(
         task="embed",
-        recipe_url=values["recipe"],
+        recipe_url=location,
         script_name=None if recipe_url else "embed",
         args=args,
         world=values["world"],
