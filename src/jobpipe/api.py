@@ -17,7 +17,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 
-from jobpipe.resolve import Plan, resolve_embed
+from jobpipe.resolve import Plan, resolve_embed, resolve_ocr
 
 
 @dataclass
@@ -64,8 +64,29 @@ def embed(source: str, *, model: str | None = None, column: str | None = None,
         output=output, world=world, limit=limit, flavor=flavor, timeout=timeout,
         recipe_url=recipe_url, keep_text=keep_text, token=token,
     )
+    return _finish(plan, launch=launch, token=token, namespace=namespace, verbose=verbose)
+
+
+def ocr(source: str, *, model: str | None = None, mode: str | None = None,
+        image_column: str | None = None, id_column: str | None = None,
+        config: str | None = None, split: str | None = None, output: str | None = None,
+        world: int | None = None, limit: int | None = None, flavor: str | None = None,
+        timeout: str | None = None, recipe_url: str | None = None, launch: bool = True,
+        token: str | None = None, namespace: str | None = None,
+        verbose: bool = True) -> Run | Plan:
+    """OCR page images to markdown: a bucket glob (hf://buckets/me/scans/**/*.jpg), a local
+    folder of images (uploaded to a bucket at launch), or a Hub dataset with an image column."""
+    plan = resolve_ocr(
+        source, model=model, mode=mode, image_column=image_column, id_column=id_column,
+        config=config, split=split, output=output, world=world, limit=limit, flavor=flavor,
+        timeout=timeout, recipe_url=recipe_url, token=token,
+    )
+    return _finish(plan, launch=launch, token=token, namespace=namespace, verbose=verbose)
+
+
+def _finish(plan: Plan, *, launch: bool, token, namespace, verbose: bool) -> Run | Plan:
     if verbose:
-        print(f"resolved embed plan:\n{plan.describe()}", file=sys.stderr)
+        print(f"resolved {plan.task} plan:\n{plan.describe()}", file=sys.stderr)
     if not launch:
         return plan
     from jobpipe.launcher import launch as _launch

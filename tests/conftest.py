@@ -19,6 +19,7 @@ def offline(monkeypatch):
                                          {"name": "id", "avg_len": 30.0}])
     monkeypatch.setattr(intro, "dataset_exists", lambda *a, **k: True)
     monkeypatch.setattr(intro, "small_columns", lambda *a, **k: [])
+    monkeypatch.setattr(intro, "image_columns", lambda *a, **k: [])
     monkeypatch.setattr(res, "_whoami", lambda token: "tester")
     monkeypatch.setattr(res, "script_path", lambda recipe: PINNED)
     return monkeypatch

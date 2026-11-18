@@ -26,7 +26,7 @@ def _hub_url(output: str) -> str | None:
 
 
 def cmd_embed(args) -> int:
-    from jobpipe.api import Run, embed
+    from jobpipe.api import embed
     from jobpipe.launcher import OutputMismatch
     from jobpipe.recipes import RecipeTooOld
 
@@ -44,6 +44,32 @@ def cmd_embed(args) -> int:
     except (ValueError, OutputMismatch, RecipeTooOld) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
+    return _report(result, args)
+
+
+def cmd_ocr(args) -> int:
+    from jobpipe.api import ocr
+    from jobpipe.launcher import OutputMismatch
+    from jobpipe.recipes import RecipeTooOld
+
+    try:
+        result = ocr(
+            args.source, model=args.model, mode=args.mode, image_column=args.image_column,
+            id_column=args.id_column, config=args.config, split=args.split, output=args.output,
+            world=args.world, limit=args.limit, flavor=args.flavor, timeout=args.timeout,
+            recipe_url=args.recipe_url, launch=not args.dry_run, token=args.token,
+            namespace=args.namespace,
+        )
+    except (ValueError, OutputMismatch, RecipeTooOld) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    return _report(result, args)
+
+
+def _report(result, args) -> int:
+    """Print a dry-run plan (commands) or a launched run, the same way for every verb."""
+    from jobpipe.api import Run
+
     if not isinstance(result, Run):  # --dry-run: a Plan, nothing launched
         if args.json:
             print(json.dumps({"plan": result.to_json(), "script_command": result.script_command(),
@@ -131,6 +157,25 @@ def cmd_logs(args) -> int:
     return code
 
 
+def _shared_options(p) -> None:
+    """Options every verb takes: input layout, output, scale, hardware, plan or launch."""
+    p.add_argument("--config", help="dataset input: default detected (prefers 'default')")
+    p.add_argument("--split", help="dataset input: default detected (prefers 'train')")
+    p.add_argument("--output", help="hf://buckets/me/b/prefix or me/dataset "
+                   "(default: a private bucket under you, named after source and model)")
+    p.add_argument("--world", type=int, help="Jobs to fan out over (default 1)")
+    p.add_argument("--limit", type=int, help="process only the first N rows or files")
+    p.add_argument("--flavor", help="default: the script header's flavor")
+    p.add_argument("--timeout", help="per Job, e.g. 30m or 4h (default: the script header's)")
+    p.add_argument("--recipe-url", help="run another copy of the script: a path or URL "
+                   "(default: the copy shipped with jobpipe)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="print the plan and the hf jobs commands; upload and launch nothing")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--token")
+    p.add_argument("--namespace", help="Jobs namespace (default: you)")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog=prog(), description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -156,22 +201,24 @@ def main(argv: list[str] | None = None) -> int:
                    help="store the text in the output too (default: only when ids are positions)")
     p.add_argument("--prefix", help="text put before every input (default: the model's "
                    "registered document prompt, chosen by the recipe)")
-    p.add_argument("--config", help="default: detected (prefers 'default')")
-    p.add_argument("--split", help="default: detected (prefers 'train')")
-    p.add_argument("--output", help="hf://buckets/me/b/prefix or me/dataset "
-                   "(default: a private bucket under you, named after source and model)")
-    p.add_argument("--world", type=int, help="Jobs to fan out over (default 1)")
-    p.add_argument("--limit", type=int, help="embed only the first N rows")
-    p.add_argument("--flavor", help="default: the recipe header's flavor")
-    p.add_argument("--timeout", help="per Job, e.g. 30m or 4h (default: the recipe header's)")
-    p.add_argument("--recipe-url", help="run another copy of the script: a path or URL "
-                   "(default: the copy shipped with jobpipe)")
-    p.add_argument("--dry-run", action="store_true",
-                   help="print the plan and the hf jobs commands; upload and launch nothing")
-    p.add_argument("--json", action="store_true")
-    p.add_argument("--token")
-    p.add_argument("--namespace", help="Jobs namespace (default: you)")
+    _shared_options(p)
     p.set_defaults(fn=cmd_embed)
+
+    p = sub.add_parser(
+        "ocr",
+        help="OCR page images to markdown: bucket glob, local folder or dataset image column",
+        description="SOURCE is a bucket glob of page images (hf://buckets/me/scans/**/*.jpg; "
+        "also .png .tif .webp .jp2), a local folder of them (uploaded to a bucket at launch), "
+        "or a Hub dataset with an image column. Runs jobpipe's copy of the uv-scripts recipe "
+        "ocr/lighton-ocr3-saturate.py. PDFs are not supported yet.",
+    )
+    p.add_argument("source")
+    p.add_argument("--model", help="default: lightonai/LightOnOCR-3-0.8B (or the 4B)")
+    p.add_argument("--mode", choices=["plain", "grounding"], help="default: plain markdown")
+    p.add_argument("--image-column", help="dataset input (default: detected)")
+    p.add_argument("--id-column", help="dataset input (default: 'id' if present)")
+    _shared_options(p)
+    p.set_defaults(fn=cmd_ocr)
 
     p = sub.add_parser("status", help="progress of a run, read from its output")
     p.add_argument("output", help="the run's output URI")

@@ -31,6 +31,11 @@ RECIPES = {
         upstream="https://github.com/davanstrien/uv-scripts/blob/main/embeddings/"
         "generate-embeddings-saturate.py",
     ),
+    "ocr": Recipe(
+        task="ocr",
+        script="ocr.py",
+        upstream="https://github.com/davanstrien/uv-scripts/blob/main/ocr/lighton-ocr3-saturate.py",
+    ),
 }
 
 

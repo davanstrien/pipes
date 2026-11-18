@@ -7,6 +7,7 @@ until someone copies it here on purpose, and uv-scripts does not have to follow 
 | File | Copied from | Commit |
 |---|---|---|
 | `embed.py` | `embeddings/generate-embeddings-saturate.py` | `b2cb30f` (branch `embeddings/shard-keep`) |
+| `ocr.py` | `ocr/lighton-ocr3-saturate.py` | `f2792c8` (`main`) |
 
 To refresh a copy: copy the file, update the first comment lines and this table, then run
 `uv run --group dev pytest`. `tests/test_scripts.py` checks that every flag jobpipe passes is

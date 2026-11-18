@@ -171,3 +171,20 @@ def small_columns(dataset: str, config: str, split: str, token: str | None = Non
         return [f["name"] for f in r.json().get("features", []) if _is_small(f.get("type", {}))]
     except Exception:  # noqa: BLE001  no viewer: no default columns
         return []
+
+
+def image_columns(dataset: str, config: str, split: str, token: str | None = None) -> list[str]:
+    """Columns the viewer types as Image, in order; [] when the viewer has nothing."""
+    headers = {"authorization": f"Bearer {token}"} if token else {}
+    try:
+        r = httpx.get(
+            f"{DATASETS_SERVER}/first-rows",
+            params={"dataset": dataset, "config": config, "split": split},
+            headers=headers,
+            timeout=30,
+        )
+        r.raise_for_status()
+        return [f["name"] for f in r.json().get("features", [])
+                if (f.get("type") or {}).get("_type") == "Image"]
+    except Exception:  # noqa: BLE001  no viewer: the caller asks for --image-column
+        return []
