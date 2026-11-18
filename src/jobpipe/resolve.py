@@ -194,9 +194,12 @@ def resolve_embed(
     timeout: str | None = None,
     recipe_url: str | None = None,
     keep_text: bool = False,
+    owner: str | None = None,
     token: str | None = None,
 ) -> Plan:
-    """Plan an embeddings run over a Hub dataset, a bucket glob or a local directory."""
+    """Plan an embeddings run over a Hub dataset, a bucket glob or a local directory.
+
+    `owner` names the default output's namespace (default: the token's user)."""
     for name, number in (("limit", limit), ("world", world), ("max_seq_len", max_seq_len)):
         if number is not None and number < 1:
             raise ValueError(f"--{name.replace('_', '-')} must be at least 1, got {number}")
@@ -261,7 +264,7 @@ def resolve_embed(
         put("output", output, "user")
     else:
         name = f"{_slug(_source_name(source))}-{_slug(values['model'].split('/')[-1])}"
-        put("output", f"hf://buckets/{_whoami(token)}/jobpipe-outputs/{name}", "default",
+        put("output", f"hf://buckets/{owner or _whoami(token)}/jobpipe-outputs/{name}", "default",
             "private bucket; the name includes the model")
     output_arg, output_uri = _normalise_output(values["output"])
     put("world", world or 1, "user" if world else "default")

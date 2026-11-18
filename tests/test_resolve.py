@@ -147,3 +147,14 @@ def test_numbers_must_be_positive(offline):
     for bad in ({"limit": 0}, {"world": 0}, {"max_seq_len": 0}):
         with pytest.raises(ValueError, match="at least 1"):
             resolve_embed("org/ds", **bad)
+
+
+def test_owner_names_the_default_output_without_a_whoami(offline):
+    import jobpipe.resolve as res
+
+    def refuse(token):
+        raise AssertionError("no whoami when owner is given")
+
+    offline.setattr(res, "_whoami", refuse)
+    plan = resolve_embed("org/ds", owner="someone")
+    assert plan.output == "hf://buckets/someone/jobpipe-outputs/ds-bge-m3"

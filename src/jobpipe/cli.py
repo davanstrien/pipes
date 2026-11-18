@@ -1,4 +1,4 @@
-"""jobpipe / `hf pipe`: run a pinned uv-scripts recipe over a dataset on HF Jobs.
+"""jobpipe / `hf pipe`: run a tested uv-scripts recipe over a dataset on HF Jobs.
 
 Agent contract: with --json, stdout carries exactly one JSON document and
 nothing else; everything for humans goes to stderr. No interactive prompts.
