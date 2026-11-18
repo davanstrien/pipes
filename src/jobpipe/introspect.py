@@ -130,3 +130,44 @@ def string_columns(
         return sorted(out, key=lambda c: (-(c["uniq"] >= 0.3), -c["avg_len"]))
     except Exception:
         return []
+
+
+def dataset_exists(dataset: str, token: str | None = None) -> bool:
+    """True when the Hub has this dataset repo and the token (or anonymous) can see it.
+
+    A typo in a dataset id otherwise plans with fallback defaults and fails only
+    inside the Job, after the model server has booted."""
+    from huggingface_hub import HfApi
+
+    try:
+        return HfApi(token=token).repo_exists(dataset, repo_type="dataset")
+    except Exception:  # noqa: BLE001  network trouble: let the run find out, do not block
+        return True
+
+
+def _is_small(feature: dict) -> bool:
+    """A scalar (Value) or a flat list of scalars; not media, not nested structures."""
+    kind = feature.get("_type")
+    if kind == "Value":
+        return True
+    if kind in ("List", "Sequence", "LargeList"):
+        return (feature.get("feature") or {}).get("_type") == "Value"
+    return False
+
+
+def small_columns(dataset: str, config: str, split: str, token: str | None = None) -> list[str]:
+    """Columns cheap to copy next to each vector: scalars and flat lists of scalars.
+
+    Read from the viewer's /first-rows features; [] when the viewer has nothing."""
+    headers = {"authorization": f"Bearer {token}"} if token else {}
+    try:
+        r = httpx.get(
+            f"{DATASETS_SERVER}/first-rows",
+            params={"dataset": dataset, "config": config, "split": split},
+            headers=headers,
+            timeout=30,
+        )
+        r.raise_for_status()
+        return [f["name"] for f in r.json().get("features", []) if _is_small(f.get("type", {}))]
+    except Exception:  # noqa: BLE001  no viewer: no default columns
+        return []

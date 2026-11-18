@@ -33,7 +33,8 @@ def cmd_embed(args) -> int:
     try:
         result = embed(
             args.source, model=args.model, column=args.column, id_column=args.id_column,
-            keep=args.keep, max_seq_len=args.max_seq_len, prefix=args.prefix,
+            keep=[] if args.keep == ["none"] else args.keep,
+            max_seq_len=args.max_seq_len, prefix=args.prefix,
             config=args.config, split=args.split, output=args.output, world=args.world,
             limit=args.limit, flavor=args.flavor, timeout=args.timeout,
             recipe_url=args.recipe_url, keep_text=args.keep_text, launch=not args.dry_run,
@@ -147,7 +148,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--column", help="text column (default: detected, else 'text')")
     p.add_argument("--id-column",
                    help="row id column (default: 'id' if the dataset has one, else the position)")
-    p.add_argument("--keep", nargs="+", metavar="COLUMN", help="source columns to copy")
+    p.add_argument("--keep", nargs="+", metavar="COLUMN",
+                   help="source columns to copy (default: every scalar column and list of "
+                   "scalars, except the text; 'none' for no columns)")
     p.add_argument("--max-seq-len", type=int, help="tokens per text (default 512)")
     p.add_argument("--keep-text", action="store_true",
                    help="store the text in the output too (default: only when ids are positions)")

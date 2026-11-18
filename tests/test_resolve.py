@@ -158,3 +158,27 @@ def test_owner_names_the_default_output_without_a_whoami(offline):
     offline.setattr(res, "_whoami", refuse)
     plan = resolve_embed("org/ds", owner="someone")
     assert plan.output == "hf://buckets/someone/jobpipe-outputs/ds-bge-m3"
+
+
+def test_unknown_dataset_is_refused_at_plan_time(offline):
+    offline.setattr(intro, "dataset_exists", lambda *a, **k: False)
+    with pytest.raises(ValueError, match="not found on the Hub"):
+        resolve_embed("biglam/europeana_newpsapers")
+
+
+def test_small_columns_are_kept_by_default(offline):
+    offline.setattr(intro, "small_columns",
+                    lambda *a, **k: ["text", "mean_ocr", "title", "language", "id"])
+    plan = resolve_embed("org/ds")
+    assert plan.values["keep"] == ["mean_ocr", "title", "language"]  # not the text, not the id
+    assert plan.provenance["keep"] == "detected"
+    assert plan.args[plan.args.index("--keep") + 1:][:3] == ["mean_ocr", "title", "language"]
+    assert "--keep" not in resolve_embed("org/ds", keep=[]).args  # --keep none
+    assert resolve_embed("org/ds", keep=["title"]).values["keep"] == ["title"]
+
+
+def test_feature_size_rule():
+    assert intro._is_small({"_type": "Value", "dtype": "string"})
+    assert intro._is_small({"_type": "List", "feature": {"_type": "Value", "dtype": "string"}})
+    assert not intro._is_small({"_type": "List", "feature": {"_type": "List"}})  # bounding boxes
+    assert not intro._is_small({"_type": "Image"})

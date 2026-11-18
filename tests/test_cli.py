@@ -49,3 +49,13 @@ def test_script_prints_the_copy(capsys):
     out = capsys.readouterr().out
     assert out.startswith("# Copy of the uv-scripts recipe") and "[tool.hf-jobs]" in out
     assert main(["script", "nope"]) == 2
+
+
+def test_keep_none(offline, capsys):
+    import jobpipe.introspect as intro
+
+    offline.setattr(intro, "small_columns", lambda *a, **k: ["title"])
+    assert main(["embed", "org/ds", "--dry-run"]) == 0
+    assert "--keep title" in capsys.readouterr().out
+    assert main(["embed", "org/ds", "--keep", "none", "--dry-run"]) == 0
+    assert "--keep" not in capsys.readouterr().out

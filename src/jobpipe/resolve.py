@@ -242,6 +242,11 @@ def resolve_embed(
         if id_column:
             put("id_column", id_column, "user")
     else:
+        if not introspect.dataset_exists(source, token=token):
+            raise ValueError(
+                f"dataset {source!r} not found on the Hub"
+                + ("" if token else " (or it is private: sign in or pass a token)")
+            )
         _resolve_hub_layout(source, config, split, column, id_column, token, put)
 
     # --- model and text handling ---------------------------------------------------
@@ -256,8 +261,15 @@ def resolve_embed(
             "predictable cost; the recipe alone would use the model maximum")
     if prefix is not None:
         put("prefix", prefix, "user")
-    if keep:
+    if keep is not None:
         put("keep", list(keep), "user")
+    elif not from_bucket:
+        skip = {values["column"], values.get("id_column")}
+        small = [name for name in introspect.small_columns(
+            source, values["config"], values["split"], token=token) if name not in skip]
+        if small:
+            put("keep", small, "detected",
+                "every scalar column and list of scalars; --keep none to skip, or name them")
 
     # --- output, scale, hardware -----------------------------------------------------
     if output:
@@ -309,8 +321,8 @@ def resolve_embed(
         put("text_out", True, "default", "position ids: the text is kept so rows stay identifiable")
     if "prefix" in values:
         args += ["--prompt", values["prefix"]]
-    if keep:
-        args += ["--keep", *keep]
+    if values.get("keep"):
+        args += ["--keep", *values["keep"]]
     if limit is not None:
         args += ["--max-samples", str(limit)]
 
