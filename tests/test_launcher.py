@@ -55,7 +55,7 @@ def wired(offline, tmp_path, monkeypatch):
 
     monkeypatch.setattr(launcher, "write_run_json", write)
     monkeypatch.setattr(launcher, "read_run_json", lambda output, token=None: store.get(output))
-    monkeypatch.setattr(launcher, "fetch_text", lambda url, token=None: HEADER)
+    monkeypatch.setattr(launcher, "read_script", lambda url, token=None: HEADER)
     monkeypatch.setattr(launcher, "get_token", lambda: "hf_test")
     return store
 
@@ -113,7 +113,56 @@ def test_old_recipe_is_refused_before_any_job(wired, monkeypatch):
 
     api = FakeApi()
     monkeypatch.setattr(launcher, "HfApi", lambda token=None: api)
-    monkeypatch.setattr(launcher, "fetch_text", lambda url, token=None: '"--model" "--column"')
+    monkeypatch.setattr(launcher, "read_script", lambda url, token=None: '"--model" "--column"')
     with pytest.raises(RecipeTooOld, match="--shard"):
         launcher.launch(resolve_embed("org/ds"))
     assert [c for c in api.calls if c[0] == "job"] == []
+
+
+def test_unreadable_run_json_stops_the_launch(wired, monkeypatch):
+    monkeypatch.setattr(launcher, "HfApi", lambda token=None: FakeApi())
+
+    def broken(output, token=None):
+        raise ValueError("not JSON")
+
+    monkeypatch.setattr(launcher, "read_run_json", broken)
+    with pytest.raises(ValueError):
+        launcher.launch(resolve_embed("org/ds"))
+
+
+def test_resume_guard_runs_before_upload(wired, monkeypatch, tmp_path):
+    api = FakeApi()
+    monkeypatch.setattr(launcher, "HfApi", lambda token=None: api)
+    (tmp_path / "a.txt").write_text("hello")
+    out = "hf://buckets/me/b/out"
+    launcher.launch(resolve_embed(str(tmp_path), output=out))
+    (tmp_path / "a.txt").write_text("changed, and longer")  # same path id, new content
+    api.calls.clear()
+    with pytest.raises(launcher.OutputMismatch, match="local_digest"):
+        launcher.launch(resolve_embed(str(tmp_path), output=out))
+    assert api.calls == []  # nothing uploaded, nothing launched
+
+
+def test_kept_columns_are_part_of_the_fingerprint(wired, monkeypatch):
+    monkeypatch.setattr(launcher, "HfApi", lambda token=None: FakeApi())
+    launcher.launch(resolve_embed("org/ds", output="hf://buckets/me/b/o2"))
+    with pytest.raises(launcher.OutputMismatch, match="keep"):
+        launcher.launch(resolve_embed("org/ds", output="hf://buckets/me/b/o2", keep=["lang"]))
+
+
+def test_failed_record_names_the_submitted_jobs(wired, monkeypatch, capsys):
+    monkeypatch.setattr(launcher, "HfApi", lambda token=None: FakeApi())
+    writes = {"n": 0}
+    original = launcher.write_run_json
+
+    def flaky(output, run_json, token=None):
+        writes["n"] += 1
+        if writes["n"] == 2:  # the write right after the first Job
+            raise OSError("network")
+        original(output, run_json, token)
+
+    monkeypatch.setattr(launcher, "write_run_json", flaky)
+    with pytest.raises(OSError):
+        launcher.launch(resolve_embed("org/ds", world=2))
+    err = capsys.readouterr().err
+    assert "rank 0: job1" in err and "run-id=" in err

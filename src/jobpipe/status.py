@@ -139,11 +139,19 @@ def status(
 
     run_json = _read_json(fs, f"{root}/run.json")
 
-    # world: exact from any stats file, else inferred from traces (gap G2 —
-    # a dead-on-arrival shard leaves no trace, hence the flag)
-    world = None
+    # A re-run with another --world leaves the earlier layout's stats and markers
+    # behind; counting them would add rows twice. Keep the current layout's only.
+    if run_json and run_json.get("world"):
+        current = run_json["world"]
+        stats = {r: s for r, s in stats.items() if r < current and s.get("world") == current}
+        markers = [r for r in markers if r < current]
+        telem_files = {r: f for r, f in telem_files.items() if r < current}
+
+    # world: from run.json, else exact from any stats file, else inferred from traces
+    # (gap G2 — a dead-on-arrival shard leaves no trace, hence the flag)
+    world = run_json.get("world") if run_json else None
     world_inferred = False
-    if stats:
+    if world is None and stats:
         world = next(iter(stats.values())).get("world")
     if world is None:
         seen = set(markers) | set(telem_files) | set(stats)

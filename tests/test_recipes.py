@@ -38,3 +38,13 @@ def test_check_flags_names_the_missing_ones():
     check_flags(text, ["org/ds", "out", "--model", "m", "--keep", "a"], "url")
     with pytest.raises(RecipeTooOld, match="--no-text, --shard"):
         check_flags(text, ["--model", "m", "--no-text", "--shard", "0/1"], "url")
+
+
+def test_token_goes_to_the_hub_host_only():
+    from jobpipe.recipes import _is_hub_host
+
+    assert _is_hub_host("https://huggingface.co/datasets/x/raw/main/a.py")
+    assert _is_hub_host("https://cdn-lfs.huggingface.co/x")
+    assert not _is_hub_host("https://example.test/huggingface.co/recipe.py")
+    assert not _is_hub_host("https://huggingface.co.evil.test/a.py")
+    assert not _is_hub_host("http://huggingface.co/a.py")

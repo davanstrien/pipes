@@ -187,3 +187,16 @@ def test_repeated_status_sees_new_parts(tmp_path):
     assert status(str(out), include_jobs=False)["storage"]["parts"] == 0
     (out / "part-1-000000-abcdef12.parquet").write_bytes(b"")
     assert status(str(out), include_jobs=False)["storage"]["parts"] == 1
+
+
+def test_stats_from_an_earlier_world_are_not_counted(tmp_path):
+    """Two shards finished 100 rows; a re-run with one shard resumed them all."""
+    out = tmp_path / "out"
+    (out / "__saturate" / "completions").mkdir(parents=True)
+    old = {"rows_done_prior": 0, "rows_processed": 50, "rows_failed": 0, "world": 2}
+    (out / "__saturate/completions/stats-1.json").write_text(json.dumps({**old, "rank": 1}))
+    new = {"rows_done_prior": 100, "rows_processed": 0, "rows_failed": 0, "world": 1, "rank": 0}
+    (out / "__saturate/completions/stats-0.json").write_text(json.dumps(new))
+    (out / "run.json").write_text(json.dumps({"world": 1, "expected_rows": 100}))
+    doc = status(str(out), include_jobs=False)
+    assert doc["progress"]["rows_ok"] == 100

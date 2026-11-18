@@ -1,13 +1,15 @@
-"""Recipes: the pinned uv scripts this layer launches. It generates no code.
+"""Recipes: the uv scripts this layer launches. It generates no code.
 
-A recipe is a single-file uv script in the uv-scripts collection. Its PEP 723
-header carries its dependencies, and its `[tool.hf-jobs]` table carries the
-Job's image, flavor, timeout and secrets. A launch pins the recipe to a commit,
-so `run.json` names the exact code that ran.
+A recipe is a single-file uv script. jobpipe ships its own copy of each (in
+jobpipe/scripts/, copied from uv-scripts), so the two repos change independently.
+The script's PEP 723 header carries its dependencies, and its `[tool.hf-jobs]`
+table the Job's image, flavor, timeout and secrets. run.json records the sha256
+of the exact script that ran.
 """
 
 from __future__ import annotations
 
+import pathlib
 import tomllib
 import urllib.request
 from dataclasses import dataclass, field
@@ -18,28 +20,30 @@ HF_JOBS_DEFAULT_TIMEOUT = "2h"
 @dataclass(frozen=True)
 class Recipe:
     task: str
-    repo_id: str  # Hub dataset repo the uv-scripts sync publishes to
-    path: str  # file path inside that repo
-    source: str  # where it is maintained (GitHub is the source of truth)
+    script: str  # file name under jobpipe/scripts/
+    upstream: str  # where the original is maintained
 
 
 RECIPES = {
     "embed": Recipe(
         task="embed",
-        repo_id="uv-scripts/embeddings",
-        path="generate-embeddings-saturate.py",
-        source="https://github.com/davanstrien/uv-scripts/blob/main/embeddings/"
+        script="embed.py",
+        upstream="https://github.com/davanstrien/uv-scripts/blob/main/embeddings/"
         "generate-embeddings-saturate.py",
     ),
 }
 
 
-def pinned_url(recipe: Recipe, token: str | None = None) -> str:
-    """The recipe's raw URL at the current commit of its Hub repo."""
-    from huggingface_hub import HfApi
+def script_path(recipe: Recipe) -> str:
+    """Local path of jobpipe's copy of the recipe (run_uv_job uploads it per launch)."""
+    return str(pathlib.Path(__file__).parent / "scripts" / recipe.script)
 
-    sha = HfApi(token=token).dataset_info(recipe.repo_id).sha
-    return f"https://huggingface.co/datasets/{recipe.repo_id}/raw/{sha}/{recipe.path}"
+
+def read_script(location: str, token: str | None = None) -> str:
+    """The script's text, from a local path or a URL."""
+    if location.startswith(("http://", "https://")):
+        return fetch_text(location, token=token)
+    return pathlib.Path(location).read_text()
 
 
 @dataclass
@@ -74,9 +78,18 @@ def parse_jobs_header(text: str) -> JobsHeader:
     )
 
 
+def _is_hub_host(url: str) -> bool:
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    on_hub = host == "huggingface.co" or host.endswith(".huggingface.co")
+    return parsed.scheme == "https" and on_hub
+
+
 def fetch_text(url: str, token: str | None = None) -> str:
     request = urllib.request.Request(url)
-    if token and "huggingface.co" in url:
+    if token and _is_hub_host(url):  # never send the token to another host
         request.add_header("Authorization", f"Bearer {token}")
     with urllib.request.urlopen(request, timeout=60) as response:
         return response.read().decode()
@@ -96,5 +109,5 @@ def check_flags(recipe_text: str, args: list[str], url: str) -> None:
     if missing:
         raise RecipeTooOld(
             f"the recipe at {url} does not accept {', '.join(missing)}. "
-            "Its Hub copy may predate these flags; pass --recipe-url with a newer copy."
+            "It may be an older copy than this jobpipe expects."
         )

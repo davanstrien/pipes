@@ -18,5 +18,5 @@ def offline(monkeypatch):
                         lambda *a, **k: [{"name": "text", "avg_len": 500.0},
                                          {"name": "id", "avg_len": 30.0}])
     monkeypatch.setattr(res, "_whoami", lambda token: "tester")
-    monkeypatch.setattr(res, "pinned_url", lambda recipe, token=None: PINNED)
+    monkeypatch.setattr(res, "script_path", lambda recipe: PINNED)
     return monkeypatch

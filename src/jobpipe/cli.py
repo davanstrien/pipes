@@ -123,8 +123,8 @@ def main(argv: list[str] | None = None) -> int:
         help="embed a text column: Hub dataset, bucket glob or local directory",
         description="SOURCE is a Hub dataset id, a bucket glob such as "
         "hf://buckets/me/b/data/*.parquet (.jsonl, .csv, .txt, .md too), or a local "
-        "directory (its files are uploaded to a bucket at launch). Runs the uv-scripts "
-        "recipe embeddings/generate-embeddings-saturate.py, pinned to a commit.",
+        "directory (its files are uploaded to a bucket at launch). Runs jobpipe's copy of "
+        "the uv-scripts recipe embeddings/generate-embeddings-saturate.py.",
     )
     p.add_argument("source")
     p.add_argument("--model", help="default: BAAI/bge-m3")
@@ -145,7 +145,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--limit", type=int, help="embed only the first N rows")
     p.add_argument("--flavor", help="default: the recipe header's flavor")
     p.add_argument("--timeout", help="per Job, e.g. 30m or 4h (default: the recipe header's)")
-    p.add_argument("--recipe-url", help="run another copy of the recipe (testing a branch)")
+    p.add_argument("--recipe-url", help="run another copy of the script: a path or URL "
+                   "(default: the copy shipped with jobpipe)")
     p.add_argument("--dry-run", action="store_true",
                    help="print the plan and the hf jobs commands; upload and launch nothing")
     p.add_argument("--json", action="store_true")

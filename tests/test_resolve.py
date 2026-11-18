@@ -90,11 +90,14 @@ def test_local_directory_is_planned_as_an_upload(offline, tmp_path):
         (notes / name).write_text("some text")
     (notes / "readme.md").write_text("# fewer of these")
     plan = resolve_embed(str(notes))
-    assert plan.args[0] == "hf://buckets/tester/jobpipe-inputs/My-Notes/**/*.txt"
+    assert plan.args[0].startswith("hf://buckets/tester/jobpipe-inputs/My-Notes-")
+    assert plan.args[0].endswith("/**/*.txt")
     assert arg(plan, "--column") == "text" and plan.provenance["column"] == "detected"
-    assert plan.uploads == [(str(notes.resolve()),
-                             "hf://buckets/tester/jobpipe-inputs/My-Notes", "*.txt")]
-    assert plan.output == "hf://buckets/tester/jobpipe-outputs/My-Notes-bge-m3"
+    directory, prefix, pattern = plan.uploads[0]
+    assert directory == str(notes.resolve()) and pattern == "*.txt"
+    assert plan.args[0] == f"{prefix}/**/*.txt"
+    name = prefix.rsplit("/", 1)[-1]  # My-Notes-<hash of the folder's path>
+    assert plan.output == f"hf://buckets/tester/jobpipe-outputs/{name}-bge-m3"
 
 
 def test_fingerprint_tracks_model_and_text_handling(offline):
@@ -128,3 +131,18 @@ def test_text_files_use_path_ids(offline):
     plan = resolve_embed("hf://buckets/me/notes/**/*.md")
     assert "--id-column" not in plan.args and "--no-text" in plan.args
     assert plan.values["id_column"] == "(file path)"
+
+
+def test_two_folders_with_one_name_get_two_snapshots(offline, tmp_path):
+    for parent in ("a", "b"):
+        (tmp_path / parent / "docs").mkdir(parents=True)
+        (tmp_path / parent / "docs" / "x.txt").write_text(parent)
+    first = resolve_embed(str(tmp_path / "a" / "docs")).uploads[0][1]
+    second = resolve_embed(str(tmp_path / "b" / "docs")).uploads[0][1]
+    assert first != second
+
+
+def test_numbers_must_be_positive(offline):
+    for bad in ({"limit": 0}, {"world": 0}, {"max_seq_len": 0}):
+        with pytest.raises(ValueError, match="at least 1"):
+            resolve_embed("org/ds", **bad)

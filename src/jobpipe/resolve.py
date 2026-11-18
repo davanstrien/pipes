@@ -7,8 +7,9 @@ rest and records where each value came from:
     "detected"  read from the dataset (datasets-server) or the input files
     "default"   this layer's hand default
 
-The result is a Plan: a pinned recipe URL plus the exact arguments for each
-Job. Nothing here launches or uploads; `launcher.launch(plan)` does that.
+The result is a Plan: the script to run (jobpipe's own copy of a uv-scripts
+recipe) plus the exact arguments for each Job. Nothing here launches or
+uploads; `launcher.launch(plan)` does that.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ import shlex
 from dataclasses import asdict, dataclass, field
 
 from jobpipe import introspect
-from jobpipe.recipes import RECIPES, pinned_url
+from jobpipe.recipes import RECIPES, script_path
 
 DEFAULT_MODEL = "BAAI/bge-m3"
 DEFAULT_MAX_SEQ_LEN = 512
@@ -37,7 +38,7 @@ class Plan:
     """What a launch will do. `args` is the recipe's argv without `--shard`."""
 
     task: str
-    recipe_url: str
+    recipe_url: str  # a local path (jobpipe's copy) or a URL
     args: list[str]
     world: int
     output: str  # storage URI holding the parts, __saturate/ and run.json
@@ -116,8 +117,23 @@ def _local_dir_source(path: str, token: str | None) -> tuple[str, tuple[str, str
     if not counts:
         raise ValueError(f"{directory} has no {', '.join(sorted(FORMATS))} files")
     suffix = max(counts, key=counts.get)
-    prefix = f"hf://buckets/{_whoami(token)}/jobpipe-inputs/{_slug(directory.name)}"
+    # One prefix per absolute path: two folders called "docs" never share a snapshot.
+    place = hashlib.sha256(str(directory).encode()).hexdigest()[:8]
+    prefix = f"hf://buckets/{_whoami(token)}/jobpipe-inputs/{_slug(directory.name)}-{place}"
     return f"{prefix}/**/*{suffix}", (str(directory), prefix, f"*{suffix}")
+
+
+def local_digest(directory: str, pattern: str) -> str:
+    """Names, sizes and modification times of the files a run uploads.
+
+    Path ids mark a file done; if a file changes, its id does not. Putting this
+    digest in the fingerprint makes a changed folder a different run."""
+    root = pathlib.Path(directory)
+    entries = sorted(
+        (str(file.relative_to(root)), file.stat().st_size, int(file.stat().st_mtime))
+        for file in root.rglob(pattern) if file.is_file()
+    )
+    return hashlib.sha256(json.dumps(entries).encode()).hexdigest()[:16]
 
 
 def _normalise_output(output: str) -> tuple[str, str]:
@@ -138,10 +154,14 @@ def fingerprint_of(values: dict) -> dict:
     """What must match for a re-run to resume into an existing output.
 
     saturate's row ids do not include the model or the text handling, so a
-    re-run with another model would skip the rows as done."""
-    keys = ("source", "config", "split", "column", "id_column", "model", "max_seq_len", "prefix")
+    re-run with another model would skip the rows as done. The output's columns
+    (kept columns, text in or out) are part of it too: parts with two shapes in one
+    output do not load as one table. --limit and --world are not: a larger limit
+    adds rows, and a smaller one leaves the rows already written in place."""
+    keys = ("source", "config", "split", "column", "id_column", "model", "max_seq_len", "prefix",
+            "keep", "text_out", "local_digest")
     data = {key: values.get(key) for key in keys}
-    data["recipe"] = RECIPES["embed"].path
+    data["recipe"] = RECIPES["embed"].script
     data["sha256"] = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:16]
     return data
 
@@ -167,6 +187,9 @@ def resolve_embed(
     token: str | None = None,
 ) -> Plan:
     """Plan an embeddings run over a Hub dataset, a bucket glob or a local directory."""
+    for name, number in (("limit", limit), ("world", world), ("max_seq_len", max_seq_len)):
+        if number is not None and number < 1:
+            raise ValueError(f"--{name.replace('_', '-')} must be at least 1, got {number}")
     prov: dict[str, str] = {}
     notes: dict[str, str] = {}
     values: dict = {}
@@ -183,6 +206,7 @@ def resolve_embed(
         source, upload = _local_dir_source(source, token)
         uploads.append(upload)
         put("source", source, "user", f"local directory, uploaded to {upload[1]} at launch")
+        values["local_digest"] = local_digest(upload[0], upload[2])
     else:
         put("source", source, "user")
     from_bucket = source.startswith("hf://buckets/")
@@ -231,7 +255,7 @@ def resolve_embed(
             "private bucket; the name includes the model")
     output_arg, output_uri = _normalise_output(values["output"])
     put("world", world or 1, "user" if world else "default")
-    if limit:
+    if limit is not None:
         put("limit", limit, "user")
     if flavor:
         put("flavor", flavor, "user")
@@ -242,7 +266,8 @@ def resolve_embed(
     if recipe_url:
         put("recipe", recipe_url, "user")
     else:
-        put("recipe", pinned_url(recipe, token=token), "default", "pinned to its current commit")
+        put("recipe", script_path(recipe), "default",
+            "jobpipe's copy of uv-scripts generate-embeddings-saturate.py")
 
     total = None
     if not from_bucket:
@@ -271,7 +296,7 @@ def resolve_embed(
         args += ["--prompt", values["prefix"]]
     if keep:
         args += ["--keep", *keep]
-    if limit:
+    if limit is not None:
         args += ["--max-samples", str(limit)]
 
     return Plan(
