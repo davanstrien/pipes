@@ -80,3 +80,21 @@ def fetch_text(url: str, token: str | None = None) -> str:
         request.add_header("Authorization", f"Bearer {token}")
     with urllib.request.urlopen(request, timeout=60) as response:
         return response.read().decode()
+
+
+class RecipeTooOld(RuntimeError):
+    """The pinned recipe does not accept a flag this layer passes."""
+
+
+def check_flags(recipe_text: str, args: list[str], url: str) -> None:
+    """Fail before launching if the recipe has no add_argument for a flag we pass.
+
+    The recipe and this layer live in different repos; a recipe pinned to a commit
+    from before a flag existed would otherwise fail inside the first Job."""
+    flags = sorted({arg for arg in args if arg.startswith("--")})
+    missing = [flag for flag in flags if f'"{flag}"' not in recipe_text]
+    if missing:
+        raise RecipeTooOld(
+            f"the recipe at {url} does not accept {', '.join(missing)}. "
+            "Its Hub copy may predate these flags; pass --recipe-url with a newer copy."
+        )

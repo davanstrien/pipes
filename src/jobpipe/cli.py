@@ -28,6 +28,7 @@ def _hub_url(output: str) -> str | None:
 def cmd_embed(args) -> int:
     from jobpipe.api import Run, embed
     from jobpipe.launcher import OutputMismatch
+    from jobpipe.recipes import RecipeTooOld
 
     try:
         result = embed(
@@ -35,10 +36,11 @@ def cmd_embed(args) -> int:
             keep=args.keep, max_seq_len=args.max_seq_len, prefix=args.prefix,
             config=args.config, split=args.split, output=args.output, world=args.world,
             limit=args.limit, flavor=args.flavor, timeout=args.timeout,
-            recipe_url=args.recipe_url, launch=not args.dry_run, token=args.token,
+            recipe_url=args.recipe_url, keep_text=args.keep_text, launch=not args.dry_run,
+            token=args.token,
             namespace=args.namespace,
         )
-    except (ValueError, OutputMismatch) as error:
+    except (ValueError, OutputMismatch, RecipeTooOld) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
     if not isinstance(result, Run):  # --dry-run: a Plan, nothing launched
@@ -131,6 +133,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="row id column (default: 'id' if the dataset has one, else the position)")
     p.add_argument("--keep", nargs="+", metavar="COLUMN", help="source columns to copy")
     p.add_argument("--max-seq-len", type=int, help="tokens per text (default 512)")
+    p.add_argument("--keep-text", action="store_true",
+                   help="store the text in the output too (default: only when ids are positions)")
     p.add_argument("--prefix", help="text put before every input (default: the model's "
                    "registered document prompt, chosen by the recipe)")
     p.add_argument("--config", help="default: detected (prefers 'default')")

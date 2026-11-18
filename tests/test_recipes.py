@@ -27,3 +27,14 @@ def test_parse_jobs_header():
 def test_no_header():
     header = parse_jobs_header("print('hi')\n")
     assert header.image is None and header.secrets == []
+
+
+def test_check_flags_names_the_missing_ones():
+    import pytest
+
+    from jobpipe.recipes import RecipeTooOld, check_flags
+
+    text = 'parser.add_argument("--model")\nparser.add_argument("--keep", nargs="+")\n'
+    check_flags(text, ["org/ds", "out", "--model", "m", "--keep", "a"], "url")
+    with pytest.raises(RecipeTooOld, match="--no-text, --shard"):
+        check_flags(text, ["--model", "m", "--no-text", "--shard", "0/1"], "url")

@@ -163,6 +163,7 @@ def resolve_embed(
     flavor: str | None = None,
     timeout: str | None = None,
     recipe_url: str | None = None,
+    keep_text: bool = False,
     token: str | None = None,
 ) -> Plan:
     """Plan an embeddings run over a Hub dataset, a bucket glob or a local directory."""
@@ -195,6 +196,7 @@ def resolve_embed(
             )
         if FORMATS[suffix] == "text":
             put("column", "text", "detected", "one row per file")
+            put("id_column", "(file path)", "detected", "relative to the glob's fixed prefix")
         elif column:
             put("column", column, "user")
         else:
@@ -253,8 +255,18 @@ def resolve_embed(
             "--max-seq-len", str(values["max_seq_len"]), "--skip-empty", "--private"]
     if not from_bucket:
         args += ["--config", values["config"], "--split", values["split"]]
-    if values.get("id_column"):
+    text_files = from_bucket and FORMATS[pathlib.PurePosixPath(source).suffix.lower()] == "text"
+    if values.get("id_column") and not text_files:
         args += ["--id-column", values["id_column"]]
+    # The text is only worth storing when the id alone cannot find the row again.
+    stable_ids = bool(values.get("id_column"))
+    if keep_text:
+        put("text_out", True, "user")
+    elif stable_ids:
+        args.append("--no-text")
+        put("text_out", False, "default", "rows join back on the id; --keep-text to store it")
+    else:
+        put("text_out", True, "default", "position ids: the text is kept so rows stay identifiable")
     if "prefix" in values:
         args += ["--prompt", values["prefix"]]
     if keep:

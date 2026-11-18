@@ -7,7 +7,11 @@ import pytest
 import jobpipe.launcher as launcher
 from jobpipe.resolve import resolve_embed
 
-HEADER = '''# /// script
+FLAGS = "".join(f'"{flag}"' for flag in (
+    "--model", "--column", "--max-seq-len", "--skip-empty", "--private", "--config", "--split",
+    "--id-column", "--prompt", "--keep", "--max-samples", "--no-text", "--shard"))
+HEADER = FLAGS + '''
+# /// script
 # [tool.hf-jobs]
 # image = "vllm/vllm-openai:v0.30.0"
 # flavor = "a10g-small"
@@ -102,3 +106,14 @@ def test_local_directory_is_uploaded_before_jobs(wired, monkeypatch, tmp_path):
     launcher.launch(resolve_embed(str(tmp_path)))
     assert api.calls[0][0] == "sync" and api.calls[0][2]["include"] == ["*.txt"]
     assert api.calls[1][0] == "job"
+
+
+def test_old_recipe_is_refused_before_any_job(wired, monkeypatch):
+    from jobpipe.recipes import RecipeTooOld
+
+    api = FakeApi()
+    monkeypatch.setattr(launcher, "HfApi", lambda token=None: api)
+    monkeypatch.setattr(launcher, "fetch_text", lambda url, token=None: '"--model" "--column"')
+    with pytest.raises(RecipeTooOld, match="--shard"):
+        launcher.launch(resolve_embed("org/ds"))
+    assert [c for c in api.calls if c[0] == "job"] == []

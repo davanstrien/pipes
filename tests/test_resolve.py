@@ -114,3 +114,17 @@ def test_bad_output(offline):
 def test_describe(offline):
     text = resolve_embed("org/ds").describe()
     assert "[detected]" in text and "[default]" in text and "'BAAI/bge-m3'" in text
+
+
+def test_text_left_out_only_when_ids_are_stable(offline):
+    assert "--no-text" in resolve_embed("org/ds").args  # 'id' column detected
+    assert "--no-text" not in resolve_embed("org/ds", keep_text=True).args
+    offline.setattr(intro, "string_columns", lambda *a, **k: [{"name": "text", "avg_len": 9.0}])
+    plan = resolve_embed("org/ds")  # position ids: keep the text
+    assert "--no-text" not in plan.args and plan.values["text_out"] is True
+
+
+def test_text_files_use_path_ids(offline):
+    plan = resolve_embed("hf://buckets/me/notes/**/*.md")
+    assert "--id-column" not in plan.args and "--no-text" in plan.args
+    assert plan.values["id_column"] == "(file path)"

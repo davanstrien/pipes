@@ -19,7 +19,7 @@ import uuid
 import fsspec
 from huggingface_hub import HfApi, get_token
 
-from jobpipe.recipes import HF_JOBS_DEFAULT_TIMEOUT, fetch_text, parse_jobs_header
+from jobpipe.recipes import HF_JOBS_DEFAULT_TIMEOUT, check_flags, fetch_text, parse_jobs_header
 from jobpipe.resolve import Plan
 
 LABEL = "jobpipe"
@@ -90,7 +90,9 @@ def launch(plan: Plan, token: str | None = None, namespace: str | None = None) -
     api = HfApi(token=token)
     token = token or get_token()
     namespace = namespace or api.whoami()["name"]
-    header = parse_jobs_header(fetch_text(plan.recipe_url, token=token))
+    recipe_text = fetch_text(plan.recipe_url, token=token)
+    check_flags(recipe_text, plan.rank_args(0), plan.recipe_url)
+    header = parse_jobs_header(recipe_text)
 
     upload_inputs(api, plan.uploads)
     _ensure_output_container(api, plan.output)

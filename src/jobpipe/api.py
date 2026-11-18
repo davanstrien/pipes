@@ -52,7 +52,7 @@ def embed(source: str, *, model: str | None = None, column: str | None = None,
           output: str | None = None, world: int | None = None,
           limit: int | None = None, flavor: str | None = None,
           timeout: str | None = None, recipe_url: str | None = None,
-          launch: bool = True, token: str | None = None,
+          keep_text: bool = False, launch: bool = True, token: str | None = None,
           namespace: str | None = None, verbose: bool = True) -> Run | Plan:
     """Embed a text column of a Hub dataset, a bucket glob (hf://buckets/me/b/*.parquet;
     also .jsonl, .csv, .txt, .md) or a local directory (uploaded to a bucket at launch).
@@ -62,7 +62,7 @@ def embed(source: str, *, model: str | None = None, column: str | None = None,
         source, model=model, column=column, id_column=id_column, keep=keep,
         max_seq_len=max_seq_len, prefix=prefix, config=config, split=split,
         output=output, world=world, limit=limit, flavor=flavor, timeout=timeout,
-        recipe_url=recipe_url, token=token,
+        recipe_url=recipe_url, keep_text=keep_text, token=token,
     )
     if verbose:
         print(f"resolved embed plan:\n{plan.describe()}", file=sys.stderr)
