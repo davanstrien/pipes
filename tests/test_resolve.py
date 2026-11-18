@@ -1,157 +1,116 @@
-"""resolve(): zero-config filling + provenance receipts."""
+"""resolve_embed(): zero-config filling, provenance, and the recipe's arguments."""
+
+import pytest
+from conftest import PINNED
 
 import jobpipe.introspect as intro
-import jobpipe.resolve as res
-from jobpipe.resolve import resolve
+from jobpipe.resolve import resolve_embed
 
 
-def _wire(monkeypatch, *, layout, columns, meta=None):
-    monkeypatch.setattr(intro, "dataset_layout", lambda ds, token=None: layout)
-    monkeypatch.setattr(
-        intro, "string_columns", lambda ds, c, s, token=None: columns
+def arg(plan, flag):
+    return plan.args[plan.args.index(flag) + 1]
+
+
+def test_zero_config_hub_dataset(offline):
+    plan = resolve_embed("org/ds")
+    assert plan.recipe_url == PINNED and plan.provenance["recipe"] == "default"
+    assert plan.args[:2] == ["org/ds", "hf://buckets/tester/jobpipe-outputs/ds-bge-m3"]
+    assert arg(plan, "--model") == "BAAI/bge-m3" and plan.provenance["model"] == "default"
+    assert arg(plan, "--column") == "text" and plan.provenance["column"] == "detected"
+    assert arg(plan, "--id-column") == "id" and plan.provenance["id_column"] == "detected"
+    assert arg(plan, "--max-seq-len") == "512"
+    assert (arg(plan, "--config"), arg(plan, "--split")) == ("default", "train")
+    assert "--skip-empty" in plan.args and "--private" in plan.args
+    assert "--prompt" not in plan.args  # the recipe picks the model's registered prompt
+    assert plan.output == "hf://buckets/tester/jobpipe-outputs/ds-bge-m3"
+    assert plan.expected_items == 10_000 and plan.world == 1
+
+
+def test_user_values_win(offline):
+    plan = resolve_embed(
+        "org/ds", model="Qwen/Qwen3-Embedding-0.6B", column="body", id_column="doc",
+        keep=["lang", "date"], max_seq_len=256, prefix="passage: ", output="me/out",
+        world=4, limit=1000, flavor="l4x1", timeout="30m",
     )
-    monkeypatch.setattr(
-        intro, "model_metadata",
-        lambda m, token=None: meta or {"params": 568_000_000, "model_type": "xlm-roberta"},
-    )
-    monkeypatch.setattr(res, "_whoami", lambda token: "tester")
+    for name in ("model", "column", "id_column", "keep", "max_seq_len", "prefix",
+                 "output", "world", "limit", "flavor", "timeout"):
+        assert plan.provenance[name] == "user", name
+    assert plan.args[1] == "me/out" and plan.output == "hf://datasets/me/out/data"
+    assert plan.args[plan.args.index("--keep") + 1:][:2] == ["lang", "date"]
+    assert arg(plan, "--prompt") == "passage: " and arg(plan, "--max-samples") == "1000"
+    assert plan.expected_items == 1000
+    assert plan.rank_args(3)[-2:] == ["--shard", "3/4"]
+    commands = plan.commands()
+    assert len(commands) == 4 and "--flavor l4x1 --timeout 30m" in commands[0]
+    assert "--shard 3/4" in commands[3] and PINNED in commands[0]
 
 
-def test_zero_config_fills_everything(monkeypatch):
-    _wire(
-        monkeypatch,
-        layout=[{"config": "corpus", "split": "validation"}],
-        columns=[{"name": "content", "avg_len": 512.3}, {"name": "title", "avg_len": 40.0}],
-    )
-    r = resolve("embeddings", "org/ds")
-    s = r.spec
-    assert (s.config, s.split) == ("corpus", "validation")
-    assert r.provenance["config"] == "detected"
-    assert s.column == "content" and r.provenance["column"] == "detected"
-    assert "longest varying string column" in r.notes["column"]
-    assert s.model == "BAAI/bge-m3" and r.provenance["model"] == "curated"
-    assert s.engine == "vllm" and r.provenance["engine"] == "curated"  # catalogue entry
-    assert s.flavor == "a10g-small" and r.provenance["flavor"] == "curated"
-    assert s.max_seq_len == 512 and r.provenance["max_seq_len"] == "curated"
-    assert s.output == "hf://buckets/tester/jobpipe-outputs/ds-embeddings"
-    assert r.provenance["output"] == "default"
+def test_longest_column_when_no_text(offline):
+    offline.setattr(intro, "string_columns",
+                    lambda *a, **k: [{"name": "content", "avg_len": 900.0},
+                                     {"name": "title", "avg_len": 40.0}])
+    plan = resolve_embed("org/ds")
+    assert arg(plan, "--column") == "content"
+    assert "longest varying string column" in plan.notes["column"]
+    assert "--id-column" not in plan.args  # no id column: the recipe uses the position
 
 
-def test_text_column_preferred_and_default_config_kept(monkeypatch):
-    _wire(
-        monkeypatch,
-        layout=[{"config": "default", "split": "train"},
-                {"config": "default", "split": "test"}],
-        columns=[{"name": "body", "avg_len": 900.0}, {"name": "text", "avg_len": 300.0}],
-    )
-    r = resolve("embeddings", "org/ds")
-    assert (r.spec.config, r.spec.split) == ("default", "train")
-    assert r.spec.column == "text"  # named 'text' beats longer strings
+def test_no_viewer_falls_back(offline):
+    offline.setattr(intro, "dataset_layout", lambda *a, **k: [])
+    offline.setattr(intro, "string_columns", lambda *a, **k: [])
+    offline.setattr(intro, "num_examples", lambda *a, **k: None)
+    plan = resolve_embed("org/private-ds")
+    assert (arg(plan, "--config"), arg(plan, "--split"), arg(plan, "--column")) == (
+        "default", "train", "text")
+    assert plan.provenance["column"] == "default" and plan.expected_items is None
 
 
-def test_user_values_win_and_skip_model_reads(monkeypatch):
-    _wire(monkeypatch, layout=[], columns=[])
-    monkeypatch.setattr(
-        intro, "model_metadata",
-        lambda m, token=None: (_ for _ in ()).throw(AssertionError("must not be called")),
-    )
-    r = resolve(
-        "embeddings", "org/ds",
-        column="prompt", model="Qwen/Qwen3-Embedding-0.6B", engine="vllm",
-        flavor="l4x1", output="hf://buckets/me/out", world=4, limit=1000,
-    )
-    for f in ("column", "model", "engine", "flavor", "output", "world", "limit"):
-        assert r.provenance[f] == "user"
-    assert r.spec.world == 4 and r.spec.limit == 1000
-
-
-def test_no_viewer_falls_back_to_defaults(monkeypatch):
-    _wire(monkeypatch, layout=[], columns=[])
-    r = resolve("embeddings", "org/private-ds", flavor="a10g-small")
-    assert (r.spec.config, r.spec.split, r.spec.column) == ("default", "train", "text")
-    assert r.provenance["column"] == "default"
-    assert "no preview" in r.notes["column"]
-
-
-def test_describe_renders_provenance(monkeypatch):
-    _wire(
-        monkeypatch,
-        layout=[{"config": "default", "split": "train"}],
-        columns=[{"name": "text", "avg_len": 100.0}],
-    )
-    out = resolve("embeddings", "org/ds").describe()
-    assert "[default]" in out and "[detected]" in out and "'BAAI/bge-m3'" in out
-
-
-def test_catalogue_model_gets_curated_engine(monkeypatch):
-    _wire(monkeypatch, layout=[], columns=[])
-    r = resolve("embeddings", "org/ds", model="Qwen/Qwen3-Embedding-0.6B",
-                flavor="a10g-small")
-    assert r.provenance["model"] == "user"
-    assert "in catalogue" in r.notes["model"]
-    assert r.spec.engine == "vllm" and r.provenance["engine"] == "curated"
-
-
-def test_uncatalogued_model_warns_and_detects(monkeypatch):
-    _wire(monkeypatch, layout=[], columns=[],
-          meta={"params": 4_000_000_000, "model_type": "qwen3"})
-    r = resolve("embeddings", "org/ds", model="some/new-embedder")
-    assert "not in catalogue" in r.notes["model"]
-    assert r.spec.engine == "vllm" and r.provenance["engine"] == "default"
-    assert r.spec.flavor == "a10g-large"  # 4B params -> wizard rule
-    assert r.spec.max_seq_len is None  # unverified model: its own maximum
-
-
-def _no_viewer(monkeypatch):
+def test_bucket_glob(offline):
     def refuse(*a, **k):
-        raise AssertionError("bucket and local inputs must not call the viewer")
+        raise AssertionError("bucket inputs must not call the viewer")
 
     for name in ("dataset_layout", "string_columns", "num_examples"):
-        monkeypatch.setattr(intro, name, refuse)
-    monkeypatch.setattr(res, "_whoami", lambda token: "tester")
+        offline.setattr(intro, name, refuse)
+    plan = resolve_embed("hf://buckets/me/corpus/data/*.parquet", column="body", limit=50)
+    assert plan.args[0] == "hf://buckets/me/corpus/data/*.parquet"
+    assert "--config" not in plan.args and arg(plan, "--column") == "body"
+    assert plan.output == "hf://buckets/tester/jobpipe-outputs/corpus-bge-m3"
+    assert plan.expected_items == 50 and plan.uploads == []
 
 
-def test_bucket_glob_reads_format_from_extension(monkeypatch):
-    _no_viewer(monkeypatch)
-    r = resolve("embeddings", "hf://buckets/me/corpus/data/*.parquet",
-                column="body", id_column="doc_id")
-    s = r.spec
-    assert s.source_format == "parquet"
-    assert s.column == "body" and r.provenance["column"] == "user"
-    assert s.id_column == "doc_id" and r.provenance["id_column"] == "user"
-    assert s.model == "BAAI/bge-m3" and s.max_seq_len == 512
-    assert s.output == "hf://buckets/tester/jobpipe-outputs/corpus-embeddings"
-    assert r.uploads == []
-
-
-def test_bucket_glob_needs_a_known_extension(monkeypatch):
-    _no_viewer(monkeypatch)
-    import pytest
-
+def test_bucket_glob_needs_a_known_extension(offline):
     with pytest.raises(ValueError, match="glob ending in"):
-        resolve("embeddings", "hf://buckets/me/corpus/data/")
+        resolve_embed("hf://buckets/me/corpus/data/")
 
 
-def test_local_directory_becomes_a_bucket_upload(monkeypatch, tmp_path):
-    _no_viewer(monkeypatch)
+def test_local_directory_is_planned_as_an_upload(offline, tmp_path):
     notes = tmp_path / "My Notes"
     (notes / "sub").mkdir(parents=True)
     for name in ("a.txt", "b.txt", "sub/c.txt"):
         (notes / name).write_text("some text")
-    (notes / "readme.md").write_text("# not the majority type")
-    (notes / "image.png").write_bytes(b"\x89PNG")
-    r = resolve("embeddings", str(notes))
-    s = r.spec
-    assert s.dataset == "hf://buckets/tester/jobpipe-inputs/My-Notes/**/*.txt"
-    assert s.source_format == "text" and s.column == "text"
-    assert r.uploads == [(str(notes.resolve()),
-                          "hf://buckets/tester/jobpipe-inputs/My-Notes", "*.txt")]
-    assert s.slug == "embed_my-notes"
-    assert s.output == "hf://buckets/tester/jobpipe-outputs/My-Notes-embeddings"
+    (notes / "readme.md").write_text("# fewer of these")
+    plan = resolve_embed(str(notes))
+    assert plan.args[0] == "hf://buckets/tester/jobpipe-inputs/My-Notes/**/*.txt"
+    assert arg(plan, "--column") == "text" and plan.provenance["column"] == "detected"
+    assert plan.uploads == [(str(notes.resolve()),
+                             "hf://buckets/tester/jobpipe-inputs/My-Notes", "*.txt")]
+    assert plan.output == "hf://buckets/tester/jobpipe-outputs/My-Notes-bge-m3"
 
 
-def test_id_column_detected_from_viewer(monkeypatch):
-    _wire(monkeypatch, layout=[{"config": "default", "split": "train"}],
-          columns=[{"name": "text", "avg_len": 900.0}, {"name": "id", "avg_len": 40.0}])
-    r = resolve("embeddings", "org/ds")
-    assert r.spec.id_column == "id" and r.provenance["id_column"] == "detected"
+def test_fingerprint_tracks_model_and_text_handling(offline):
+    base = resolve_embed("org/ds").fingerprint
+    assert resolve_embed("org/ds").fingerprint == base
+    assert resolve_embed("org/ds", model="other/model").fingerprint["sha256"] != base["sha256"]
+    assert resolve_embed("org/ds", max_seq_len=128).fingerprint["sha256"] != base["sha256"]
+    # scale and limits do not change what a row's result is
+    assert resolve_embed("org/ds", world=8, limit=5).fingerprint == base
+
+
+def test_bad_output(offline):
+    with pytest.raises(ValueError, match="ns/name"):
+        resolve_embed("org/ds", output="just-a-name")
+
+
+def test_describe(offline):
+    text = resolve_embed("org/ds").describe()
+    assert "[detected]" in text and "[default]" in text and "'BAAI/bge-m3'" in text

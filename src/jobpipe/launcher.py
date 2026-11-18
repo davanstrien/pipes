@@ -1,104 +1,144 @@
-"""launch(spec): stage the driver, fan out one job per rank, write run.json.
+"""launch(plan): upload inputs, check the output, launch one Job per rank, record run.json.
 
-The API path and the printed `hf jobs run` commands are the same payload —
-one delivery mode (staged driver), so the copy-paste escape hatch and the
-programmatic path can't drift apart.
+Run identity is carried on the Jobs as labels (`jobpipe`, `run-id`, `rank`), so a
+UI can find a run from a label-filtered Job list with no database. `run.json`,
+next to the outputs, records what labels cannot: the pinned recipe, the exact
+arguments, the expected row count and the fingerprint that guards resume.
 
-Run identity is carried on the jobs themselves as labels (`jobpipe`,
-`run-id`, `rank`) — no database: a UI recovers the
-whole run from a label-filtered job list. run.json carries what labels can't.
+`run.json` is written before the first Job is submitted and again after each
+one, so a failure part-way through leaves a record of the Jobs already running.
 """
 
 from __future__ import annotations
 
 import datetime as _dt
 import json
-import re
+import sys
+import uuid
 
 import fsspec
 from huggingface_hub import HfApi, get_token
 
-from jobpipe.compiler import CompiledRun, compile
-from jobpipe.spec import TaskSpec
-from jobpipe.templates import get_template
+from jobpipe.recipes import HF_JOBS_DEFAULT_TIMEOUT, fetch_text, parse_jobs_header
+from jobpipe.resolve import Plan
 
-LABEL = "jobpipe"  # bare marker label
+LABEL = "jobpipe"
+
+
+class OutputMismatch(RuntimeError):
+    """The output already holds a run with a different setup."""
+
+
+def _container(output: str) -> tuple[str, str]:
+    """('bucket' | 'dataset', 'ns/name') for an output URI."""
+    if output.startswith("hf://buckets/"):
+        return "bucket", "/".join(output.removeprefix("hf://buckets/").split("/")[:2])
+    return "dataset", "/".join(output.removeprefix("hf://datasets/").split("/")[:2])
 
 
 def _ensure_output_container(api: HfApi, output: str) -> None:
-    # run.json is written at launch, before any job runs — the container must
-    # exist now (also spares status() the existing_ids-on-missing-repo trap).
-    stripped = re.sub(r"^hf://(datasets|buckets)/", "", output)
-    repo = "/".join(stripped.split("/")[:2])
-    if output.startswith("hf://buckets/"):
+    kind, repo = _container(output)
+    if kind == "bucket":
         api.create_bucket(repo, private=True, exist_ok=True)
-    elif output.startswith("hf://datasets/"):
+    else:
         api.create_repo(repo, repo_type="dataset", private=True, exist_ok=True)
 
 
+def read_run_json(output: str, token: str | None = None) -> dict | None:
+    try:
+        with fsspec.open(f"{output.rstrip('/')}/run.json", "r", token=token) as f:
+            return json.load(f)
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+
+
 def write_run_json(output: str, run_json: dict, token: str | None = None) -> str:
-    # token must be passed explicitly: in hosted contexts (Spaces) there is no
-    # ambient cached token, and fsspec alone can't see the private repo the
-    # same launch just created (found live: Space launch, 2026-07-30)
+    # pass the token explicitly: a Space has no cached token, and fsspec alone
+    # cannot see a private repo the same launch just created
     uri = f"{output.rstrip('/')}/run.json"
     with fsspec.open(uri, "w", token=token) as f:
         f.write(json.dumps(run_json, indent=2))
     return uri
 
 
-def launch(
-    spec: TaskSpec,
-    token: str | None = None,
-    namespace: str | None = None,
-    compiled: CompiledRun | None = None,
-) -> dict:
-    """Returns the launched run.json (also written to {output}/run.json)."""
+def upload_inputs(api: HfApi, uploads) -> None:
+    """Sync local directories to their bucket prefixes (only the chosen file type)."""
+    for directory, prefix, pattern in uploads:
+        api.create_bucket(_container(prefix)[1], private=True, exist_ok=True)
+        print(f"uploading {pattern} from {directory} to {prefix}", file=sys.stderr)
+        api.sync_bucket(directory, prefix, include=[pattern], quiet=True)
+
+
+def check_resume(plan: Plan, token: str | None = None) -> dict | None:
+    """Refuse an output that holds a run with another fingerprint (model, text handling...)."""
+    earlier = read_run_json(plan.output, token=token)
+    if earlier and earlier.get("fingerprint", {}).get("sha256") != plan.fingerprint["sha256"]:
+        differs = sorted(
+            key for key in plan.fingerprint
+            if key != "sha256" and earlier.get("fingerprint", {}).get(key) != plan.fingerprint[key]
+        )
+        raise OutputMismatch(
+            f"{plan.output} holds run {earlier.get('run_id')} with a different setup "
+            f"({', '.join(differs)}). Its rows would be skipped as done. "
+            "Choose another --output."
+        )
+    return earlier
+
+
+def launch(plan: Plan, token: str | None = None, namespace: str | None = None) -> dict:
+    """Launch the plan. Returns the run.json document (also written next to the outputs)."""
     api = HfApi(token=token)
-    compiled = compiled or compile(spec, token=token)
-    spec = compiled.spec
-    template = get_template(spec.task)
+    token = token or get_token()
     namespace = namespace or api.whoami()["name"]
+    header = parse_jobs_header(fetch_text(plan.recipe_url, token=token))
 
-    staging = template.staging_repo(spec)
-    api.create_repo(staging, repo_type="dataset", private=True, exist_ok=True)
-    api.upload_file(
-        path_or_fileobj=compiled.driver.encode(),
-        path_in_repo=compiled.driver_name,
-        repo_id=staging,
-        repo_type="dataset",
-    )
-    _ensure_output_container(api, spec.output)
+    upload_inputs(api, plan.uploads)
+    _ensure_output_container(api, plan.output)
+    earlier = check_resume(plan, token=token)
 
-    jobs = []
-    for rank in range(spec.world):
-        job = api.run_job(
-            image=template.image(spec),
-            command=["bash", "-c", template.job_shell(spec, compiled.driver_name, rank)],
-            flavor=spec.flavor,
-            secrets={"HF_TOKEN": token or get_token()},
-            # quiet download bars, so a crash's traceback is findable in the logs
-            env={"HF_HUB_DISABLE_PROGRESS_BARS": "1"},
-            timeout=spec.timeout,
+    run_id = uuid.uuid4().hex[:8]
+    run_json = {
+        "version": 2,
+        "task": plan.task,
+        "run_id": run_id,
+        "resumes": earlier.get("run_id") if earlier else None,
+        "recipe": plan.recipe_url,
+        "args": plan.args,
+        "world": plan.world,
+        "flavor": plan.flavor or header.flavor,
+        "image": header.image,
+        "timeout": plan.timeout or header.timeout or HF_JOBS_DEFAULT_TIMEOUT,
+        "fingerprint": plan.fingerprint,
+        "expected_items": plan.expected_items,
+        # status.py reads rows; one text per request, so rows == items
+        "expected_rows": plan.expected_items,
+        "items_per_row": 1,
+        "resolved": {"provenance": plan.provenance, "notes": plan.notes},
+        "created_at": _dt.datetime.now(_dt.UTC).isoformat(),
+        "jobs": [],
+        "state": "launching",
+    }
+    write_run_json(plan.output, run_json, token=token)
+
+    # The recipes need HF_TOKEN only; other secrets a header names are not ours to fill.
+    secrets = {"HF_TOKEN": token}
+    env = {**header.env, "HF_HUB_DISABLE_PROGRESS_BARS": "1"}
+    for rank in range(plan.world):
+        job = api.run_uv_job(
+            plan.recipe_url,
+            script_args=plan.rank_args(rank),
+            image=header.image,
+            flavor=run_json["flavor"],
+            timeout=run_json["timeout"],
+            secrets=secrets,
+            env=env,
             namespace=namespace,
-            labels={
-                LABEL: "",
-                "run-id": compiled.run_id,
-                "rank": str(rank),
-                # labels must match ^[a-zA-Z0-9._-]*$ (Jobs API validation)
-                "name": f"{compiled.slug}-{compiled.run_id}-r{rank}",
-            },
+            labels={LABEL: "", "run-id": run_id, "rank": str(rank)},
         )
-        jobs.append(
-            {
-                "rank": rank,
-                "id": job.id,
-                "owner": namespace,
-                "url": getattr(job, "url", None),
-            }
+        run_json["jobs"].append(
+            {"rank": rank, "id": job.id, "owner": namespace, "url": getattr(job, "url", None)}
         )
-
-    run_json = dict(compiled.run_json)
-    run_json["jobs"] = jobs
-    run_json["created_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
-    write_run_json(spec.output, run_json, token=token)
+        write_run_json(plan.output, run_json, token=token)
+    run_json["state"] = "launched"
+    write_run_json(plan.output, run_json, token=token)
     return run_json

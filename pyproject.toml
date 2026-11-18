@@ -1,14 +1,13 @@
 [project]
 name = "jobpipe"
 version = "0.1.0"
-description = "Run a model over a whole dataset on Hugging Face Jobs with one command: embed (more tasks coming). Zero-config with receipts, or eject to an editable uv script."
+description = "Run a pinned uv-scripts recipe over a dataset on Hugging Face Jobs: resolve with provenance, fan out, read progress from storage."
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "huggingface_hub>=2.0",
     "httpx>=0.27",
-    "pydantic>=2.7",
     "fsspec>=2024.2",
     "pyarrow>=15",
 ]

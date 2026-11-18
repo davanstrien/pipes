@@ -1,47 +1,20 @@
-"""jobpipe: task verbs -> saturate driver compiler + launcher + status.
+"""jobpipe: run a model over a whole dataset on Hugging Face Jobs.
 
-The layer between a UI and saturate: run models over datasets on HF Jobs.
-
-Three-layer picture: saturate is the low-level client (serving -> datasets/
-buckets in, resumable parquet out; knows nothing about Jobs or hardware);
-THIS layer covers common tasks on Jobs behind one python call / CLI verb with
-sensible defaults; datatrove is the flexible DAG-shaped library above, for
-workloads that are actual pipelines.
+Three layers: saturate is the low-level batch client (a serving engine in,
+resumable parquet out); the uv-scripts recipes are tested single-file scripts
+built on it; this package resolves a short request into a pinned recipe plus
+its arguments, launches one Job per shard, and reads progress back from
+storage. It generates no code.
 
     from jobpipe import embed
-    run = embed("HuggingFaceFW/fineweb-edu", column="text", model="BAAI/bge-m3",
-                output="hf://buckets/me/fw-embeds", world=4)
-    run.status(); run.publish("me/fineweb-edu-embeddings")
-
-Design intent: templates
-are functions; script emission is a projection of them, not a parallel source
-of truth. The planned execution path is a generic runner from a pinned wheel;
-ejected scripts default THIN (importing task functions), with full inlining an
-explicit eject-and-mutate fork. Flip timing: design-sprint material — its
-trigger (a second task template) has fired; blocked only on naming/packaging
-decisions the sprint owns.
+    run = embed("biglam/europeana_newspapers", keep=["language"], world=4)
+    run.status()
 """
 
-from jobpipe.api import Run, embed, generate
-from jobpipe.compiler import CompiledRun, compile
-from jobpipe.spec import TaskSpec
+from jobpipe.api import Run, embed
+from jobpipe.resolve import Plan
 
-__all__ = [
-    "CompiledRun",
-    "Run",
-    "TaskSpec",
-    "compile",
-    "embed",
-    "generate",
-    "launch",
-    "status",
-]
-
-
-def launch(spec, **kwargs):  # lazy import: keeps `compile` usable offline
-    from jobpipe.launcher import launch as _launch
-
-    return _launch(spec, **kwargs)
+__all__ = ["Plan", "Run", "embed", "status"]
 
 
 def status(output_uri, **kwargs):

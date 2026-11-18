@@ -1,65 +1,86 @@
-"""resolve() — fill a partial intent into a launchable TaskSpec, with receipts.
+"""resolve: fill a partial request into a launch Plan, with receipts.
 
-The zero-config seam: verbs and CLI pass what the user actually said; this
-module fills the rest and records WHERE each value came from —
+The zero-config seam. Verbs pass what the user said; this module fills the
+rest and records where each value came from:
 
-    "user"      the caller passed it explicitly
-    "curated"   from the catalogue: a tested, receipted model path
-    "detected"  read from the dataset/model (datasets-server, model config)
-    "default"   the layer's hand default (receipted in the templates)
+    "user"      the caller passed it
+    "detected"  read from the dataset (datasets-server) or the input files
+    "default"   this layer's hand default
 
-The provenance map is printed before launch (and belongs in run.json), so a
-zero-config run is never magic: every filled blank is attributable. Same
-receipted-vs-derived distinction as the uv-scripts SERVING dicts.
-
-Rule: model-specific knowledge is DATA (catalogue/config), never template code. resolve()
-may look values up (model_type -> engine, params -> flavor) but templates
-never hard-code per-model values.
+The result is a Plan: a pinned recipe URL plus the exact arguments for each
+Job. Nothing here launches or uploads; `launcher.launch(plan)` does that.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import pathlib
 import re
-from dataclasses import dataclass, field
+import shlex
+from dataclasses import asdict, dataclass, field
 
-from jobpipe import catalogue, introspect
-from jobpipe.spec import TaskSpec
+from jobpipe import introspect
+from jobpipe.recipes import RECIPES, pinned_url
+
+DEFAULT_MODEL = "BAAI/bge-m3"
+DEFAULT_MAX_SEQ_LEN = 512
+
+# File extension -> `datasets` builder, for bucket and local-directory inputs.
+# Must match BUCKET_FORMATS in the embeddings recipe.
+FORMATS = {".parquet": "parquet", ".jsonl": "json", ".json": "json", ".csv": "csv",
+           ".txt": "text", ".md": "text"}
 
 
 @dataclass
-class Resolution:
-    spec: TaskSpec
-    provenance: dict[str, str] = field(default_factory=dict)  # field -> user|detected|default
-    notes: dict[str, str] = field(default_factory=dict)  # field -> one-line why
+class Plan:
+    """What a launch will do. `args` is the recipe's argv without `--shard`."""
+
+    task: str
+    recipe_url: str
+    args: list[str]
+    world: int
+    output: str  # storage URI holding the parts, __saturate/ and run.json
+    flavor: str | None = None  # None: the recipe header's flavor
+    timeout: str | None = None  # None: the recipe header's timeout
+    expected_items: int | None = None
+    fingerprint: dict = field(default_factory=dict)
+    provenance: dict[str, str] = field(default_factory=dict)
+    notes: dict[str, str] = field(default_factory=dict)
+    values: dict = field(default_factory=dict)  # the resolved fields, for describe()
     # (local directory, bucket prefix, file pattern) to upload before launch
     uploads: list[tuple[str, str, str]] = field(default_factory=list)
 
+    def rank_args(self, rank: int) -> list[str]:
+        return [*self.args, "--shard", f"{rank}/{self.world}"]
+
+    def commands(self) -> list[str]:
+        """The equivalent `hf jobs uv run` commands, one per rank."""
+        options = []
+        if self.flavor:
+            options.append(f"--flavor {self.flavor}")
+        if self.timeout:
+            options.append(f"--timeout {self.timeout}")
+        options.append("-s HF_TOKEN -e HF_HUB_DISABLE_PROGRESS_BARS=1")
+        return [
+            f"hf jobs uv run {' '.join(options)} \\\n  {self.recipe_url} \\\n  "
+            + " ".join(shlex.quote(arg) for arg in self.rank_args(rank))
+            for rank in range(self.world)
+        ]
+
     def describe(self) -> str:
-        """Human block printed before launch (stderr)."""
+        """The provenance block printed before launch (stderr)."""
         lines = []
-        for f in ("dataset", "config", "split", "column", "id_column", "keep", "model",
-                  "engine", "flavor", "max_seq_len", "world", "output", "limit"):
-            if f not in self.provenance:
+        for name, value in self.values.items():
+            if name not in self.provenance:
                 continue
-            val = getattr(self.spec, f)
-            note = self.notes.get(f)
-            lines.append(f"  {f:<11} {val!r:<44} [{self.provenance[f]}]"
+            note = self.notes.get(name)
+            lines.append(f"  {name:<11} {value!r:<46} [{self.provenance[name]}]"
                          + (f"  {note}" if note else ""))
         return "\n".join(lines)
 
-
-def _repo_slug(dataset: str, task: str) -> str:
-    if dataset.startswith("hf://buckets/"):
-        parts = dataset.removeprefix("hf://buckets/").split("/")
-        name = parts[1] if len(parts) > 1 else (parts[0] or "bucket")
-        if name == "jobpipe-inputs" and len(parts) > 2:  # an uploaded local directory
-            name = parts[2]
-    else:
-        name = dataset.split("/")[-1] or "ds"
-    name = re.sub(r"[^A-Za-z0-9-]+", "-", name).strip("-") or "ds"
-    suffix = {"embeddings": "embeddings", "generation": "generated", "ocr": "ocr"}.get(task, task)
-    return f"{name}-{suffix}"[:96]
+    def to_json(self) -> dict:
+        return asdict(self)
 
 
 def _whoami(token: str | None) -> str:
@@ -68,300 +89,234 @@ def _whoami(token: str | None) -> str:
     return HfApi(token=token).whoami()["name"]
 
 
-def resolve(
-    task: str,
-    dataset: str,
-    *,
-    token: str | None = None,
-    **user: object,
-) -> Resolution:
-    """Build a launchable TaskSpec from (task, dataset) + whatever the user
-    passed in `user` (only NON-None values count as user-passed)."""
-    user = {k: v for k, v in user.items() if v is not None}
-    prov: dict[str, str] = {"dataset": "user"}
-    notes: dict[str, str] = {}
-    vals: dict[str, object] = {"task": task, "dataset": dataset}
-
-    if task == "ocr":
-        return _resolve_bucket_task(task, dataset, user, prov, notes, vals, token)
-    uploads: list[tuple[str, str, str]] = []
-    if task == "embeddings" and pathlib.Path(dataset).expanduser().is_dir():
-        dataset, upload = _local_dir_source(dataset, token)
-        uploads.append(upload)
-        vals["dataset"] = dataset
-        notes["dataset"] = f"local directory, uploaded to {upload[1]} before launch"
-    if task == "embeddings" and dataset.startswith("hf://buckets/"):
-        return _resolve_embed_bucket(dataset, user, prov, notes, vals, token, uploads)
-
-    # --- config / split: never assume default/train exist -------------------
-    layout = None
-    for f, prefer in (("config", "default"), ("split", "train")):
-        if f in user:
-            vals[f] = user[f]
-            prov[f] = "user"
-            continue
-        if layout is None:
-            layout = introspect.dataset_layout(dataset, token=token)
-        if layout:
-            if f == "config":
-                configs = list(dict.fromkeys(s["config"] for s in layout))
-                vals[f] = prefer if prefer in configs else configs[0]
-            else:
-                splits = [s["split"] for s in layout if s["config"] == vals["config"]]
-                vals[f] = prefer if prefer in splits else (splits[0] if splits else prefer)
-            prov[f] = "detected"
-        else:
-            vals[f] = prefer
-            prov[f] = "default"
-            notes[f] = "viewer had no layout; assuming"
-
-    # --- column: prefer 'text', else longest string column in the preview ---
-    if "column" in user:
-        vals["column"] = user["column"]
-        prov["column"] = "user"
-    else:
-        cols = introspect.string_columns(
-            dataset, str(vals["config"]), str(vals["split"]), token=token
-        )
-        names = [c["name"] for c in cols]
-        if "text" in names:
-            vals["column"] = "text"
-            prov["column"] = "detected"
-        elif cols:
-            vals["column"] = cols[0]["name"]
-            prov["column"] = "detected"
-            others = ", ".join(names[1:4])
-            notes["column"] = (
-                f"longest varying string column in preview "
-                f"(avg {cols[0]['avg_len']} chars, {int(cols[0].get('uniq', 1) * 100)}% distinct"
-                + (f"; others: {others}" if others else "") + ")"
-            )
-        else:
-            vals["column"] = "text"
-            prov["column"] = "default"
-            notes["column"] = "no preview available; assuming"
-    if task == "embeddings" and "id_column" not in user:
-        cols = introspect.string_columns(
-            dataset, str(vals["config"]), str(vals["split"]), token=token
-        )
-        if "id" in [c["name"] for c in cols]:
-            vals["id_column"] = "id"
-            prov["id_column"] = "detected"
-            notes["id_column"] = "string column named 'id'; output rows join back on it"
-
-    # --- model: catalogue first (curated, receipted), else caller's ---------
-    entry = None
-    if "model" in user:
-        vals["model"] = user["model"]
-        prov["model"] = "user"
-        entry = catalogue.lookup(task, str(user["model"]))
-        if entry:
-            notes["model"] = f"in catalogue: {entry['why']}"
-        elif catalogue.entries(task):
-            notes["model"] = "not in catalogue — unverified path, resolved from metadata"
-    else:
-        entry = catalogue.default_entry(task)
-        if entry is None:
-            raise ValueError(f"no curated model for task {task!r} — pass model=")
-        vals["model"] = entry["model"]
-        prov["model"] = "curated"
-        notes["model"] = entry["why"]
-
-    # --- engine / flavor: catalogue entry, else read the model --------------
-    need_meta = (
-        "flavor" not in user and (entry is None or "flavor" not in entry.get("serving", {}))
-    ) and task == "embeddings"
-    meta = introspect.model_metadata(str(vals["model"]), token=token) if need_meta else {}
-    if "engine" in user:
-        vals["engine"] = user["engine"]
-        prov["engine"] = "user"
-    elif entry is not None and "engine" in entry:
-        vals["engine"] = entry["engine"]
-        prov["engine"] = "curated"
-        notes["engine"] = "from catalogue entry (receipted arrangement)"
-    elif task == "embeddings":
-        vals["engine"] = "vllm"
-        prov["engine"] = "default"
-        notes["engine"] = "vLLM pooling; unverified model path"
-    if "flavor" in user:
-        vals["flavor"] = user["flavor"]
-        prov["flavor"] = "user"
-    elif task == "embeddings" and entry is not None and "flavor" in entry.get("serving", {}):
-        vals["flavor"] = entry["serving"]["flavor"]
-        prov["flavor"] = "curated"
-    elif task == "embeddings":
-        vals["flavor"] = introspect.suggest_flavor(meta.get("params"))
-        prov["flavor"] = "detected" if meta.get("params") else "default"
-    if task == "embeddings":
-        _apply_serving(entry, user, vals, prov)
-
-    # --- output: auto-named private dataset repo under the caller -----------
-    _resolve_output(task, dataset, user, prov, notes, vals, token)
-
-    # --- pass-through knobs --------------------------------------------------
-    for f in PASS_THROUGH:
-        if f in user:
-            vals[f] = user[f]
-            prov[f] = "user"
-
-    return Resolution(spec=TaskSpec(**vals), provenance=prov, notes=notes, uploads=uploads)
+def _slug(text: str) -> str:
+    return re.sub(r"[^A-Za-z0-9-]+", "-", text).strip("-") or "x"
 
 
-PASS_THROUGH = ("world", "limit", "batch", "max_tokens", "temperature", "publish",
-                "keep", "timeout")
-
-# File extension -> `datasets` builder, for bucket and local-directory inputs.
-FORMATS = {".parquet": "parquet", ".jsonl": "json", ".json": "json", ".csv": "csv",
-           ".txt": "text", ".md": "text"}
-
-
-def _resolve_output(task, dataset, user, prov, notes, vals, token) -> None:
-    if "output" in user:
-        vals["output"] = user["output"]
-        prov["output"] = "user"
-        return
-    owner = _whoami(token)
-    if task == "embeddings":
-        # buckets take concurrent writes from several ranks without commit contention
-        vals["output"] = f"hf://buckets/{owner}/jobpipe-outputs/{_repo_slug(dataset, task)}"
-        prov["output"] = "default"
-        notes["output"] = "private bucket, created on first write"
-        return
-    vals["output"] = f"hf://datasets/{owner}/{_repo_slug(dataset, task)}/data"
-    prov["output"] = "default"
-    notes["output"] = "private dataset repo, created on first write"
-
-
-def _apply_serving(entry, user, vals, prov) -> None:
-    """Text handling for embeddings: user > catalogue serving entry > default."""
-    serving = (entry or {}).get("serving", {})
-    for f in ("id_column", "max_seq_len", "prefix", "serve_args"):
-        if f in user:
-            vals[f] = user[f]
-            prov[f] = "user"
-        elif f in serving:
-            vals[f] = serving[f]
-            prov[f] = "curated"
+def _source_name(source: str) -> str:
+    if source.startswith("hf://buckets/"):
+        parts = source.removeprefix("hf://buckets/").split("/")
+        if len(parts) > 2 and parts[1] == "jobpipe-inputs":  # an uploaded local directory
+            return parts[2]
+        return parts[1] if len(parts) > 1 else parts[0]
+    return source.split("/")[-1]
 
 
 def _local_dir_source(path: str, token: str | None) -> tuple[str, tuple[str, str, str]]:
     """A local directory becomes a bucket glob under the caller's jobpipe-inputs bucket.
 
-    The most common supported file type in the directory decides the format; only
-    files of that type are uploaded (at launch, not here)."""
+    The most common supported file type decides the format; only files of that
+    type are uploaded (by the launcher, not here)."""
     directory = pathlib.Path(path).expanduser().resolve()
     counts: dict[str, int] = {}
     for file in directory.rglob("*"):
-        if file.is_file() and file.suffix.lower() in FORMATS:
-            counts[file.suffix.lower()] = counts.get(file.suffix.lower(), 0) + 1
+        suffix = file.suffix.lower()
+        if file.is_file() and suffix in FORMATS:
+            counts[suffix] = counts.get(suffix, 0) + 1
     if not counts:
         raise ValueError(f"{directory} has no {', '.join(sorted(FORMATS))} files")
     suffix = max(counts, key=counts.get)
-    name = re.sub(r"[^A-Za-z0-9-]+", "-", directory.name).strip("-") or "input"
-    prefix = f"hf://buckets/{_whoami(token)}/jobpipe-inputs/{name}"
+    prefix = f"hf://buckets/{_whoami(token)}/jobpipe-inputs/{_slug(directory.name)}"
     return f"{prefix}/**/*{suffix}", (str(directory), prefix, f"*{suffix}")
 
 
-def _resolve_embed_bucket(dataset, user, prov, notes, vals, token, uploads) -> Resolution:
-    """Embeddings from a bucket glob: the format comes from the glob's extension,
-    and there is no viewer to read columns from."""
-    suffix = pathlib.PurePosixPath(dataset).suffix.lower()
-    if suffix not in FORMATS:
-        raise ValueError(
-            f"bucket input needs a glob ending in one of {', '.join(sorted(FORMATS))}, "
-            f"for example hf://buckets/me/b/data/*.parquet — got {dataset!r}"
-        )
-    vals["source_format"] = FORMATS[suffix]
-    prov.setdefault("dataset", "user")
-    notes.setdefault("dataset", f"bucket glob read as {FORMATS[suffix]}")
-    if FORMATS[suffix] == "text":
-        vals["column"] = "text"  # the datasets text builder names its column "text"
-        prov["column"] = "detected"
-        notes["column"] = "one row per file"
-    elif "column" in user:
-        vals["column"] = user["column"]
-        prov["column"] = "user"
-    else:
-        vals["column"] = "text"
-        prov["column"] = "default"
-        notes["column"] = "no viewer for bucket files; pass --column if not 'text'"
-    if "id_column" in user:
-        vals["id_column"] = user["id_column"]
-        prov["id_column"] = "user"
+def _normalise_output(output: str) -> tuple[str, str]:
+    """User output -> (recipe positional argument, storage URI of the parts).
 
-    entry = None
-    if "model" in user:
-        vals["model"] = user["model"]
-        prov["model"] = "user"
-        entry = catalogue.lookup("embeddings", str(user["model"]))
-        if entry is None:
-            notes["model"] = "not in catalogue — unverified path"
-    else:
-        entry = catalogue.default_entry("embeddings")
-        vals["model"] = entry["model"]
-        prov["model"] = "curated"
-        notes["model"] = entry["why"]
-    vals["engine"] = "vllm"
-    prov["engine"] = "curated" if entry is not None else "default"
-    serving = (entry or {}).get("serving", {})
-    if "flavor" in user:
-        vals["flavor"] = user["flavor"]
-        prov["flavor"] = "user"
-    else:
-        vals["flavor"] = serving.get("flavor", "a10g-small")
-        prov["flavor"] = "curated" if "flavor" in serving else "default"
-    _apply_serving(entry, {k: v for k, v in user.items() if k != "id_column"}, vals, prov)
-    _resolve_output("embeddings", dataset, user, prov, notes, vals, token)
-    for f in PASS_THROUGH:
-        if f in user:
-            vals[f] = user[f]
-            prov[f] = "user"
-    return Resolution(spec=TaskSpec(**vals), provenance=prov, notes=notes, uploads=uploads)
+    Accepts hf://buckets/ns/b/prefix, hf://datasets/ns/name or ns/name."""
+    if output.startswith("hf://buckets/"):
+        if len(output.removeprefix("hf://buckets/").split("/")) < 2:
+            raise ValueError(f"a bucket output needs ns/bucket at least: {output!r}")
+        return output, output.rstrip("/")
+    repo = output.removeprefix("hf://datasets/").strip("/")
+    if len(repo.split("/")) != 2:
+        raise ValueError(f"a dataset output is ns/name (the parts go in its data/): {output!r}")
+    return repo, f"hf://datasets/{repo}/data"
 
 
-def _resolve_bucket_task(task, dataset, user, prov, notes, vals, token) -> Resolution:
-    """Bucket-glob tasks: no config/split/column reads — the introspection
-    surface is the glob itself (validated by the spec) + the catalogue."""
-    notes["dataset"] = "bucket glob; ids = file paths, resume per page"
-    entry = None
-    if "model" in user:
-        vals["model"] = user["model"]
-        prov["model"] = "user"
-        entry = catalogue.lookup(task, str(user["model"]))
-        if entry:
-            notes["model"] = f"in catalogue: {entry['why']}"
-        elif catalogue.entries(task):
-            notes["model"] = ("not in catalogue — unverified path: generic prompt, "
-                             "conservative serving defaults")
-    else:
-        entry = catalogue.default_entry(task)
-        if entry is None:
-            raise ValueError(f"no curated model for task {task!r} — pass model=")
-        vals["model"] = entry["model"]
-        prov["model"] = "curated"
-        notes["model"] = entry["why"]
+def fingerprint_of(values: dict) -> dict:
+    """What must match for a re-run to resume into an existing output.
 
-    vals["engine"] = user.get("engine", "vllm")
-    prov["engine"] = "user" if "engine" in user else "curated"
-    if "flavor" in user:
-        vals["flavor"] = user["flavor"]
-        prov["flavor"] = "user"
-    else:
-        vals["flavor"] = "a10g-small"
-        prov["flavor"] = "default"
-        notes["flavor"] = "the port-matrix workhorse; override for bigger pages/models"
+    saturate's row ids do not include the model or the text handling, so a
+    re-run with another model would skip the rows as done."""
+    keys = ("source", "config", "split", "column", "id_column", "model", "max_seq_len", "prefix")
+    data = {key: values.get(key) for key in keys}
+    data["recipe"] = RECIPES["embed"].path
+    data["sha256"] = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:16]
+    return data
 
-    if "output" in user:
-        vals["output"] = user["output"]
-        prov["output"] = "user"
-    else:
-        owner = _whoami(token)
-        vals["output"] = f"hf://datasets/{owner}/{_repo_slug(dataset, task)}/data"
-        prov["output"] = "default"
-        notes["output"] = "private dataset repo, created on first write"
 
-    for f in ("world", "limit", "max_tokens", "publish"):
-        if f in user:
-            vals[f] = user[f]
-            prov[f] = "user"
-    return Resolution(spec=TaskSpec(**vals), provenance=prov, notes=notes)
+def resolve_embed(
+    source: str,
+    *,
+    model: str | None = None,
+    column: str | None = None,
+    id_column: str | None = None,
+    keep: list[str] | None = None,
+    max_seq_len: int | None = None,
+    prefix: str | None = None,
+    config: str | None = None,
+    split: str | None = None,
+    output: str | None = None,
+    world: int | None = None,
+    limit: int | None = None,
+    flavor: str | None = None,
+    timeout: str | None = None,
+    recipe_url: str | None = None,
+    token: str | None = None,
+) -> Plan:
+    """Plan an embeddings run over a Hub dataset, a bucket glob or a local directory."""
+    prov: dict[str, str] = {}
+    notes: dict[str, str] = {}
+    values: dict = {}
+    uploads: list[tuple[str, str, str]] = []
+
+    def put(name, value, how, note=None):
+        values[name] = value
+        prov[name] = how
+        if note:
+            notes[name] = note
+
+    # --- source -----------------------------------------------------------------
+    if pathlib.Path(source).expanduser().is_dir():
+        source, upload = _local_dir_source(source, token)
+        uploads.append(upload)
+        put("source", source, "user", f"local directory, uploaded to {upload[1]} at launch")
+    else:
+        put("source", source, "user")
+    from_bucket = source.startswith("hf://buckets/")
+
+    if from_bucket:
+        suffix = pathlib.PurePosixPath(source).suffix.lower()
+        if suffix not in FORMATS:
+            raise ValueError(
+                f"a bucket input is a glob ending in one of {', '.join(sorted(FORMATS))}, "
+                f"for example hf://buckets/me/b/data/*.parquet; got {source!r}"
+            )
+        if FORMATS[suffix] == "text":
+            put("column", "text", "detected", "one row per file")
+        elif column:
+            put("column", column, "user")
+        else:
+            put("column", "text", "default",
+                "no viewer for bucket files; pass --column if not 'text'")
+        if id_column:
+            put("id_column", id_column, "user")
+    else:
+        _resolve_hub_layout(source, config, split, column, id_column, token, put)
+
+    # --- model and text handling ---------------------------------------------------
+    if model:
+        put("model", model, "user")
+    else:
+        put("model", DEFAULT_MODEL, "default", "multilingual (100+ languages), 1024-d")
+    if max_seq_len:
+        put("max_seq_len", max_seq_len, "user")
+    else:
+        put("max_seq_len", DEFAULT_MAX_SEQ_LEN, "default",
+            "predictable cost; the recipe alone would use the model maximum")
+    if prefix is not None:
+        put("prefix", prefix, "user")
+    if keep:
+        put("keep", list(keep), "user")
+
+    # --- output, scale, hardware -----------------------------------------------------
+    if output:
+        put("output", output, "user")
+    else:
+        name = f"{_slug(_source_name(source))}-{_slug(values['model'].split('/')[-1])}"
+        put("output", f"hf://buckets/{_whoami(token)}/jobpipe-outputs/{name}", "default",
+            "private bucket; the name includes the model")
+    output_arg, output_uri = _normalise_output(values["output"])
+    put("world", world or 1, "user" if world else "default")
+    if limit:
+        put("limit", limit, "user")
+    if flavor:
+        put("flavor", flavor, "user")
+    if timeout:
+        put("timeout", timeout, "user")
+
+    recipe = RECIPES["embed"]
+    if recipe_url:
+        put("recipe", recipe_url, "user")
+    else:
+        put("recipe", pinned_url(recipe, token=token), "default", "pinned to its current commit")
+
+    total = None
+    if not from_bucket:
+        total = introspect.num_examples(source, values["config"], values["split"], token=token)
+    known = [count for count in (total, limit) if count is not None]
+    expected = min(known) if known else None
+
+    # --- the recipe's arguments ------------------------------------------------------
+    args = [source, output_arg, "--model", values["model"], "--column", values["column"],
+            "--max-seq-len", str(values["max_seq_len"]), "--skip-empty", "--private"]
+    if not from_bucket:
+        args += ["--config", values["config"], "--split", values["split"]]
+    if values.get("id_column"):
+        args += ["--id-column", values["id_column"]]
+    if "prefix" in values:
+        args += ["--prompt", values["prefix"]]
+    if keep:
+        args += ["--keep", *keep]
+    if limit:
+        args += ["--max-samples", str(limit)]
+
+    return Plan(
+        task="embed",
+        recipe_url=values["recipe"],
+        args=args,
+        world=values["world"],
+        output=output_uri,
+        flavor=flavor,
+        timeout=timeout,
+        expected_items=expected,
+        fingerprint=fingerprint_of(values),
+        provenance=prov,
+        notes=notes,
+        values=values,
+        uploads=uploads,
+    )
+
+
+def _resolve_hub_layout(source, config, split, column, id_column, token, put) -> None:
+    """config, split, text column and id column of a Hub dataset, from the viewer."""
+    layout = None
+    chosen: dict[str, str] = {}
+    for name, given, prefer in (("config", config, "default"), ("split", split, "train")):
+        if given:
+            put(name, given, "user")
+            chosen[name] = given
+            continue
+        if layout is None:
+            layout = introspect.dataset_layout(source, token=token)
+        if layout:
+            if name == "config":
+                options = list(dict.fromkeys(s["config"] for s in layout))
+            else:
+                options = [s["split"] for s in layout if s["config"] == chosen["config"]]
+            value = prefer if prefer in options else (options[0] if options else prefer)
+            put(name, value, "detected")
+        else:
+            value = prefer
+            put(name, value, "default", "viewer had no layout; assuming")
+        chosen[name] = value
+
+    columns = introspect.string_columns(source, chosen["config"], chosen["split"], token=token)
+    names = [c["name"] for c in columns]
+    if column:
+        put("column", column, "user")
+    elif "text" in names:
+        put("column", "text", "detected")
+    elif columns:
+        others = ", ".join(names[1:4])
+        put("column", columns[0]["name"], "detected",
+            f"longest varying string column in preview (avg {columns[0]['avg_len']} chars"
+            + (f"; others: {others}" if others else "") + ")")
+    else:
+        put("column", "text", "default", "no preview available; assuming")
+
+    if id_column:
+        put("id_column", id_column, "user")
+    elif "id" in names:
+        put("id_column", "id", "detected", "string column named 'id'; output rows join back on it")

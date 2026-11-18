@@ -1,62 +1,33 @@
-"""CLI: zero-config verb path + --dump eject."""
+"""CLI: --dry-run prints the plan and commands; --json is one document."""
 
-import jobpipe.introspect as intro
-import jobpipe.resolve as res
-from jobpipe.cli import main
+import json
 
-
-def _stub(monkeypatch):
-    monkeypatch.setattr(intro, "num_examples", lambda *a, **k: 10_000)
-    monkeypatch.setattr(intro, "dataset_layout",
-                        lambda *a, **k: [{"config": "default", "split": "train"}])
-    monkeypatch.setattr(intro, "string_columns",
-                        lambda *a, **k: [{"name": "text", "avg_len": 500.0}])
-    monkeypatch.setattr(intro, "model_metadata",
-                        lambda *a, **k: {"params": 568_000_000, "model_type": "xlm-roberta"})
-    monkeypatch.setattr(res, "_whoami", lambda token: "tester")
+from jobpipe.cli import main, watch_done
 
 
-def test_zero_config_compile_only(monkeypatch, capsys):
-    _stub(monkeypatch)
-    assert main(["embed", "org/ds", "--compile-only"]) == 0
+def test_dry_run_prints_commands(offline, capsys):
+    assert main(["embed", "org/ds", "--world", "2", "--dry-run"]) == 0
     out, err = capsys.readouterr()
-    # driver on stdout: vLLM pooling, auto-named bucket output, PEP 723 header
-    assert "# /// script" in out and "[tool.hf-jobs]" in out
-    assert '"--runner", "pooling"' in out
-    assert "hf://buckets/tester/jobpipe-outputs/ds-embeddings" in out
-    # provenance receipts on stderr
-    assert "resolved embeddings spec" in err
-    assert "[default]" in err and "[detected]" in err
+    assert out.count("hf jobs uv run") == 2 and "--shard 1/2" in out
+    assert "resolved embed plan" in err and "[detected]" in err
 
 
-def test_dump_writes_editable_uv_script(monkeypatch, capsys, tmp_path):
-    _stub(monkeypatch)
-    target = tmp_path / "my-embed.py"
-    assert main(["embed", "org/ds", "--dump", str(target)]) == 0
-    text = target.read_text()
-    assert text.startswith("# /// script")
-    assert 'saturate[hf]' in text and "[tool.hf-jobs]" in text
-    _, err = capsys.readouterr()
-    assert "hf jobs uv run" in err and str(target) in err
+def test_dry_run_json(offline, capsys):
+    assert main(["embed", "org/ds", "--dry-run", "--json"]) == 0
+    out, _ = capsys.readouterr()
+    doc = json.loads(out)
+    assert doc["plan"]["recipe_url"].startswith("https://") and len(doc["commands"]) == 1
 
 
-def test_generate_still_requires_model(monkeypatch, capsys):
-    _stub(monkeypatch)
-    try:
-        main(["generate", "org/ds", "--compile-only"])
-        raise AssertionError("argparse should have exited")
-    except SystemExit as e:
-        assert e.code == 2
+def test_bad_source_is_a_clean_error(offline, capsys):
+    assert main(["embed", "hf://buckets/me/b/data/", "--dry-run"]) == 2
+    assert "error:" in capsys.readouterr().err
 
 
-def test_watch_done_waits_for_active_jobs():
-    from jobpipe.cli import watch_done
-
+def test_watch_done():
     shards_done = [{"rank": 0, "done": True}, {"rank": 1, "done": True}]
     assert watch_done({"shards": shards_done, "jobs": []})
-    assert watch_done({"shards": shards_done, "jobs": [{"rank": 0, "stage": "COMPLETED"}]})
-    # a re-run into a finished output: old markers, but a Job is still running
+    assert watch_done({"shards": [], "jobs": [{"rank": 0, "stage": "ERROR"}]})
     assert not watch_done({"shards": shards_done, "jobs": [{"rank": 0, "stage": "RUNNING"}]})
-    assert not watch_done({"shards": shards_done, "jobs": [{"rank": 1, "stage": "SCHEDULING"}]})
     assert not watch_done({"shards": [{"rank": 0, "done": False}], "jobs": []})
     assert not watch_done({"shards": [], "jobs": []})

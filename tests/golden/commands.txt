@@ -1,3 +1,0 @@
-hf jobs run --flavor a10g-small --timeout 2h --secrets HF_TOKEN \
-  -e HF_HUB_DISABLE_PROGRESS_BARS=1 vllm/vllm-openai:v0.30.0 \
-  bash -c 'curl -sfL -H "Authorization: Bearer $HF_TOKEN" https://huggingface.co/datasets/davanstrien/jobpipe-staging/resolve/main/embed_fineweb-edu.py -o /tmp/run.py && uv run /tmp/run.py --rank 0 --world 1'

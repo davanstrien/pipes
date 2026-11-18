@@ -1,7 +1,7 @@
 """Dataset/model introspection helpers.
 
 The G1 denominator problem in miniature: streaming `datasets` never exposes a
-row count, so the layer that compiles a run has to find it elsewhere. Chain:
+row count, so the layer that plans a run has to find it elsewhere. Chain:
 
 1. dataset-viewer `/info` — num_examples for anything the viewer has processed
    (the read the console wizard proved out).
@@ -18,15 +18,6 @@ from __future__ import annotations
 import httpx
 
 DATASETS_SERVER = "https://datasets-server.huggingface.co"
-
-# Encoder model_types serve best on TEI (+18% on bge-m3, jobs 6a68c171a9f4 /
-# 6a68c18115e8); decoder-style models are a vLLM/TEI tie — default vLLM.
-# Set copied from the console wizard, which auto-suggested the arm from
-# config.model_type.
-ENCODER_TYPES = {
-    "bert", "roberta", "xlm-roberta", "camembert", "distilbert", "mpnet",
-    "modernbert", "electra", "deberta-v2", "nomic_bert", "new", "gte",
-}
 
 
 def num_examples(
@@ -139,29 +130,3 @@ def string_columns(
         return sorted(out, key=lambda c: (-(c["uniq"] >= 0.3), -c["avg_len"]))
     except Exception:
         return []
-
-
-def model_metadata(model: str, token: str | None = None) -> dict:
-    """The two reads the wizard bases suggestions on: param count + model_type."""
-    from huggingface_hub import HfApi
-
-    info = HfApi(token=token).model_info(model)
-    params = (info.safetensors.total if info.safetensors else None) or None
-    model_type = (getattr(info, "config", None) or {}).get("model_type")
-    return {"params": params, "model_type": model_type}
-
-
-def suggest_engine(model_type: str | None) -> str:
-    return "tei" if model_type in ENCODER_TYPES else "vllm"
-
-
-def suggest_flavor(params: int | None) -> str:
-    """Flavor from param count — the console wizard's rule of thumb."""
-    if params is None:
-        return "a10g-small"
-    b = params / 1e9
-    if b <= 1.5:
-        return "a10g-small"
-    if b <= 4:
-        return "a10g-large"
-    return "a100-large"
