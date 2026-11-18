@@ -178,3 +178,12 @@ def test_telemetry_epoch_tie_prefers_sidecar_dir(tmp_path):
     doc = status(str(out), include_jobs=False)
     assert [t["ok"] for t in doc["telemetry"]["0"]] == [2]  # the __saturate/ file
     assert doc["progress"]["rows_ok"] == 3  # Sum(ok) still counts both files
+
+
+def test_repeated_status_sees_new_parts(tmp_path):
+    """`status --watch` calls status() on one output many times: new parts must show."""
+    out = tmp_path / "out"
+    out.mkdir()
+    assert status(str(out), include_jobs=False)["storage"]["parts"] == 0
+    (out / "part-1-000000-abcdef12.parquet").write_bytes(b"")
+    assert status(str(out), include_jobs=False)["storage"]["parts"] == 1

@@ -69,6 +69,9 @@ def status(
     # ambient token, and the storage channel must see private repos (same bug
     # family as the launcher's run.json write; found live twice on 2026-07-30)
     fs, root = fsspec.core.url_to_fs(output_uri, **({"token": token} if token else {}))
+    # fsspec reuses filesystem instances and their directory listings; `status --watch`
+    # polls the same output, so drop the cached listing or new parts never show.
+    fs.invalidate_cache(root)
     root = root.rstrip("/")
     try:
         found = fs.find(root)
