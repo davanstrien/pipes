@@ -1,6 +1,6 @@
 [project]
 name = "jobpipe"
-version = "0.1.0"
+version = "0.2.0"
 description = "Run a pinned uv-scripts recipe over a dataset on Hugging Face Jobs: resolve with provenance, fan out, read progress from storage."
 readme = "README.md"
 license = "Apache-2.0"

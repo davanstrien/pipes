@@ -31,3 +31,21 @@ def test_watch_done():
     assert not watch_done({"shards": shards_done, "jobs": [{"rank": 0, "stage": "RUNNING"}]})
     assert not watch_done({"shards": [{"rank": 0, "done": False}], "jobs": []})
     assert not watch_done({"shards": [], "jobs": []})
+
+
+def test_dry_run_commands_use_the_written_out_script(offline, capsys):
+    import jobpipe.resolve as res
+    from jobpipe.recipes import script_path
+
+    offline.setattr(res, "script_path", script_path)
+    assert main(["embed", "org/ds", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("hf pipe script embed > embed.py")
+    assert "\n  embed.py \\\n" in out and "site-packages" not in out
+
+
+def test_script_prints_the_copy(capsys):
+    assert main(["script", "embed"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("# Copy of the uv-scripts recipe") and "[tool.hf-jobs]" in out
+    assert main(["script", "nope"]) == 2

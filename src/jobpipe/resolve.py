@@ -39,9 +39,11 @@ class Plan:
 
     task: str
     recipe_url: str  # a local path (jobpipe's copy) or a URL
+    # set when recipe_url is jobpipe's own copy: `hf pipe script <name>` writes it out
     args: list[str]
     world: int
     output: str  # storage URI holding the parts, __saturate/ and run.json
+    script_name: str | None = None
     flavor: str | None = None  # None: the recipe header's flavor
     timeout: str | None = None  # None: the recipe header's timeout
     expected_items: int | None = None
@@ -56,7 +58,9 @@ class Plan:
         return [*self.args, "--shard", f"{rank}/{self.world}"]
 
     def commands(self) -> list[str]:
-        """The equivalent `hf jobs uv run` commands, one per rank."""
+        """The equivalent `hf jobs uv run` commands, one per rank. With jobpipe's own
+        copy of the script they name `<name>.py`, written out by `script_command()`."""
+        script = f"{self.script_name}.py" if self.script_name else self.recipe_url
         options = []
         if self.flavor:
             options.append(f"--flavor {self.flavor}")
@@ -64,10 +68,16 @@ class Plan:
             options.append(f"--timeout {self.timeout}")
         options.append("-s HF_TOKEN -e HF_HUB_DISABLE_PROGRESS_BARS=1")
         return [
-            f"hf jobs uv run {' '.join(options)} \\\n  {self.recipe_url} \\\n  "
+            f"hf jobs uv run {' '.join(options)} \\\n  {script} \\\n  "
             + " ".join(shlex.quote(arg) for arg in self.rank_args(rank))
             for rank in range(self.world)
         ]
+
+    def script_command(self) -> str | None:
+        """The command that writes jobpipe's copy of the script next to the commands."""
+        if not self.script_name:
+            return None
+        return f"hf pipe script {self.script_name} > {self.script_name}.py"
 
     def describe(self) -> str:
         """The provenance block printed before launch (stderr)."""
@@ -302,6 +312,7 @@ def resolve_embed(
     return Plan(
         task="embed",
         recipe_url=values["recipe"],
+        script_name=None if recipe_url else "embed",
         args=args,
         world=values["world"],
         output=output_uri,

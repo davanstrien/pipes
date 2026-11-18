@@ -31,9 +31,11 @@ the parts a recipe alone does not have:
 hf pipe embed biglam/europeana_newspapers --limit 200000 --world 4 --dry-run
 ```
 
-prints the resolved values and the equivalent `hf jobs uv run` command for each
-Job. Copy one and edit it, or run without `--dry-run`. `--json` gives one JSON
-document for agents.
+prints the resolved values, then the commands that do the same by hand:
+`hf pipe script embed > embed.py` writes out the script, and one
+`hf jobs uv run ... embed.py ...` line per Job follows. Run those, edit the
+script first, or run without `--dry-run`. `--json` gives one JSON document for
+agents.
 
 ```
 resolved embed plan:
@@ -73,8 +75,9 @@ You need a token with Jobs access (`hf auth login`). Jobs bill by the minute.
   drives the vLLM server, sets how many requests are in flight, and writes
   resumable parquet with durable error rows.
 - [uv-scripts](https://huggingface.co/uv-scripts) recipes: the code that runs.
-  `embed` uses `embeddings/generate-embeddings-saturate.py` (vLLM pooling, one
-  text per request, float32 output, row ids and kept columns).
+  hf-pipe ships its own copy (`src/jobpipe/scripts/`), so the two repos change
+  independently. `embed` runs a copy of `embeddings/generate-embeddings-saturate.py`
+  (vLLM pooling, one text per request, float32 output, row ids and kept columns).
 - `hf pipe`: resolve, launch, record, status.
 
 ## Known limits

@@ -45,12 +45,14 @@ def cmd_embed(args) -> int:
         return 2
     if not isinstance(result, Run):  # --dry-run: a Plan, nothing launched
         if args.json:
-            print(json.dumps({"plan": result.to_json(), "commands": result.commands()}))
+            print(json.dumps({"plan": result.to_json(), "script_command": result.script_command(),
+                              "commands": result.commands()}))
         else:
-            if result.uploads:
-                for directory, prefix, pattern in result.uploads:
-                    print(f"# first: hf buckets sync {directory} {prefix} --include '{pattern}'")
-            print("\n\n".join(result.commands()))
+            for directory, prefix, pattern in result.uploads:
+                print(f"hf buckets sync {directory} {prefix} --include '{pattern}' --delete")
+            if result.script_command():
+                print(result.script_command())
+            print("\n" + "\n\n".join(result.commands()))
         return 0
     if args.json:
         print(json.dumps(result.run_json))
@@ -85,6 +87,20 @@ def cmd_status(args) -> int:
         if not args.watch or watch_done(doc):
             return 0
         time.sleep(args.interval)
+
+
+def cmd_script(args) -> int:
+    """Print jobpipe's copy of a recipe, to read, edit or run with `hf jobs uv run`."""
+    import pathlib
+
+    from jobpipe.recipes import RECIPES, script_path
+
+    if args.name not in RECIPES:
+        print(f"error: no script {args.name!r}; known: {', '.join(sorted(RECIPES))}",
+              file=sys.stderr)
+        return 2
+    sys.stdout.write(pathlib.Path(script_path(RECIPES[args.name])).read_text())
+    return 0
 
 
 def cmd_logs(args) -> int:
@@ -162,6 +178,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-jobs", action="store_true", help="storage only, no Jobs API")
     p.add_argument("--token")
     p.set_defaults(fn=cmd_status)
+
+    p = sub.add_parser("script", help="print the script a task runs (to read, edit or run "
+                       "yourself with hf jobs uv run)")
+    p.add_argument("name", help="task name, e.g. embed")
+    p.set_defaults(fn=cmd_script)
 
     p = sub.add_parser("logs", help="Job logs for a run, by output URI (reads run.json)")
     p.add_argument("output")

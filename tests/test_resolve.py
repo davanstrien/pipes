@@ -42,7 +42,8 @@ def test_user_values_win(offline):
     assert plan.rank_args(3)[-2:] == ["--shard", "3/4"]
     commands = plan.commands()
     assert len(commands) == 4 and "--flavor l4x1 --timeout 30m" in commands[0]
-    assert "--shard 3/4" in commands[3] and PINNED in commands[0]
+    assert "--shard 3/4" in commands[3] and "  embed.py " in commands[0]
+    assert plan.script_command() == "hf pipe script embed > embed.py"
 
 
 def test_longest_column_when_no_text(offline):
