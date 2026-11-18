@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 
@@ -165,6 +166,8 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(fn=cmd_logs)
 
     args = parser.parse_args(argv)
+    # run_uv_job warns on every call that it is experimental; we pin to it knowingly.
+    os.environ.setdefault("HF_HUB_DISABLE_EXPERIMENTAL_WARNING", "1")
     # Hub upload bars (local-directory sync) drown the provenance block.
     from huggingface_hub.utils import disable_progress_bars
 

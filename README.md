@@ -3,130 +3,83 @@
 Run a model over a whole dataset on [Hugging Face Jobs](https://huggingface.co/docs/huggingface_hub/guides/jobs) with one command.
 
 ```
-hf pipe embed fka/prompts.chat
+hf pipe embed biglam/europeana_newspapers --keep language date --world 4
 ```
 
-That's the entire invocation: no GPU on your machine, no config file, no concurrency
-tuning. It resolves everything it needs, launches a Job, streams results to a
-dataset repo as they arrive, and tells you exactly what it decided:
+`hf pipe` does not generate code. It runs a tested single-file recipe from
+[uv-scripts](https://huggingface.co/uv-scripts), pinned to a commit, and adds
+the parts a recipe alone does not have:
+
+- **Fills the blanks, with receipts.** Config, split, text column and id column
+  are read from the dataset viewer. Every value is labelled with where it came
+  from (`user`, `detected`, `default`) before anything launches.
+- **Takes three kinds of input.** A Hub dataset id, a bucket glob
+  (`hf://buckets/me/b/data/*.parquet`; also `.jsonl`, `.csv`, `.txt`, `.md`),
+  or a local directory, which is synced to a bucket first.
+- **Fans out.** `--world 4` starts 4 Jobs with `--shard 0/4` ... `3/4` and one
+  output. Each row's id decides its shard, so the Jobs need no coordinator.
+- **Records the run.** `run.json` next to the output holds the pinned recipe,
+  the exact arguments, the Job ids and a fingerprint of the setup. A re-run
+  with the same setup resumes. A re-run with another model or text handling is
+  refused, because its rows would be skipped as done.
+- **Reads progress from storage.** `hf pipe status <output>` counts rows from
+  saturate's files; no database.
+
+## See before you spend
 
 ```
-resolved embeddings spec:
-  dataset  'fka/prompts.chat'   [user]
-  config   'default'            [detected]
-  split    'train'              [detected]
-  column   'prompt'             [detected]  longest varying string column in preview
-  model    'BAAI/bge-m3'        [curated]   multilingual all-rounder; encoder -> TEI
-  engine   'tei'                [curated]   from catalogue entry (receipted arrangement)
-  flavor   'a10g-small'         [default]
-  output   'hf://datasets/you/prompts-chat-embeddings/data'  [default]
-run 9fee4f3d: 1 job(s) launched
-output: hf://datasets/you/prompts-chat-embeddings/data
-watch: hf pipe status 'hf://datasets/you/prompts-chat-embeddings/data'
+hf pipe embed biglam/europeana_newspapers --limit 200000 --world 4 --dry-run
 ```
 
-Zero-config is never magic: every filled blank is labeled with where it came from
-(`user` / `curated` / `detected` / `default`), and every line is overridable
-(`--column`, `--model`, `--flavor`, ...). `--world 4` fans the same run out over
-4 Jobs. Kill anything anytime; re-running the same command resumes exactly
-(results are keyed by row id — done work is never repeated).
+prints the resolved values and the equivalent `hf jobs uv run` command for each
+Job. Copy one and edit it, or run without `--dry-run`. `--json` gives one JSON
+document for agents.
 
-**v0 ships three tasks: `embed`, `generate` and `ocr`.** The design is task-general (the
-same spec/compile path is built to carry OCR, transcription, ...); more tasks
-land as they earn receipts.
+```
+resolved embed plan:
+  source      'biglam/europeana_newspapers'   [user]
+  config      'default'                       [detected]
+  column      'text'                          [detected]
+  id_column   'id'                            [detected]  string column named 'id'; output rows join back on it
+  model       'BAAI/bge-m3'                   [default]   multilingual (100+ languages), 1024-d
+  max_seq_len 512                             [default]   predictable cost; the recipe alone would use the model maximum
+  output      'hf://buckets/you/jobpipe-outputs/europeana_newspapers-bge-m3' [default]
+```
 
 ## Install
-
-As an `hf` CLI extension:
 
 ```
 hf extensions install davanstrien/hf-pipe
 hf pipe embed user/dataset
 ```
 
-Or standalone:
-
-```
-pip install git+https://github.com/davanstrien/hf-pipe   # CLI: jobpipe embed ...
-```
-
-Or from Python:
+or `pip install git+https://github.com/davanstrien/hf-pipe` for the `jobpipe`
+command and the Python API:
 
 ```python
 from jobpipe import embed
 
-run = embed("user/dataset")          # same resolution path, same receipts
-run.status()                          # progress read from storage, exact counts
-run.publish("you/my-embeddings")      # optional: compile output to a clean dataset
+plan = embed("user/dataset", launch=False)   # resolve only
+print(*plan.commands(), sep="\n")
+run = embed("user/dataset", world=2)
+run.status()
 ```
 
-You need a Hugging Face token with Jobs access (`hf auth login`). Jobs bill by
-the minute; the runs above cost a few cents each.
+You need a token with Jobs access (`hf auth login`). Jobs bill by the minute.
 
-## See before you spend
+## The pieces
 
-```
-hf pipe embed user/dataset --compile-only    # print the exact code + commands, launch nothing
-hf pipe embed user/dataset --dump my.py      # eject an editable uv script, launch nothing
-hf jobs uv run --flavor a10g-small --image vllm/vllm-openai:v0.33.0 -s HF_TOKEN my.py
-```
+- [saturate](https://github.com/davanstrien/saturate): the batch client. It
+  drives the vLLM server, sets how many requests are in flight, and writes
+  resumable parquet with durable error rows.
+- [uv-scripts](https://huggingface.co/uv-scripts) recipes: the code that runs.
+  `embed` uses `embeddings/generate-embeddings-saturate.py` (vLLM pooling, one
+  text per request, float32 output, row ids and kept columns).
+- `hf pipe`: resolve, launch, record, status.
 
-The generated driver is a self-contained [PEP 723](https://peps.python.org/pep-0723/)
-uv script (with a `[tool.hf-jobs]` header carrying its Job config) built on
-[saturate](https://github.com/davanstrien/saturate) for adaptive concurrency,
-crash-safe resumable output, and durable error rows. Edit the ejected script
-freely — it has no dependency on this repo.
+## Known limits
 
-## The second task: generate
-
-Prompt-in-column text generation, same resolution path:
-
-```
-hf pipe generate user/dataset --model Qwen/Qwen2.5-7B-Instruct
-```
-
-`--model` stays required — there's no honest hand default for open-set
-generation; everything else (column, output, flavor) resolves as with embed.
-One request per row, content-hash row ids (identical prompts dedupe for free).
-
-## The third task: ocr
-
-Point at a bucket of page scans, get a markdown dataset:
-
-```
-hf pipe ocr 'hf://buckets/you/scans/**/*.jpg'
-```
-
-Row ids are file paths, so resume is per-page and a re-run pays listing, not
-transfer. The curated model (LightOnOCR-2-1B) brings its receipted serving
-arrangement and prompt contract from the catalogue; other models run with
-conservative generic defaults, labeled `unverified path`. PDFs are refused —
-rasterization is a separate stage
-([#4](https://github.com/davanstrien/hf-pipe/issues/4)); a dataset-with-image-or-pdf-column
-input mode is the planned follow-up
-([#6](https://github.com/davanstrien/hf-pipe/issues/6)).
-
-## Tested model paths
-
-```
-hf pipe catalogue
-```
-
-Curated models per task ship with run receipts (date, job, throughput, failure
-count). Any other model works too — it's resolved from Hub metadata and labeled
-`unverified path` so you know which regime you're in.
-
-## Anatomy of a run
-
-Every run writes to its output location: parquet result parts (streamed while
-hot), a `run.json` intent record (spec, expected counts, the staged driver's
-sha256, resolution provenance), exact-count stats, and completion markers.
-`hf pipe status <output>` — or anything else that can read the repo — renders
-progress from storage alone; no Jobs API required.
-
-## Status
-
-Early, working, moving. One task, receipts for everything it claims. Issues and
-model-path contributions (with receipts) welcome.
-
-Extending (new tasks, new curated models): see [EXTENDING.md](EXTENDING.md).
+- Each Job reads the whole input and keeps its share of the rows. For a very
+  large dataset with many Jobs, that repeats the download per Job.
+- Kept columns are written as strings (lists and dicts as JSON).
+- One task so far (`embed`). Another task is another recipe plus a resolver.
