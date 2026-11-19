@@ -146,12 +146,12 @@ def dataset_exists(dataset: str, token: str | None = None) -> bool:
 
 
 def _is_small(feature: dict) -> bool:
-    """A scalar (Value) or a flat list of scalars; not media, not nested structures."""
+    """A scalar (Value or ClassLabel) or a flat list of them; not media, not nested."""
     kind = feature.get("_type")
-    if kind == "Value":
+    if kind in ("Value", "ClassLabel"):
         return True
     if kind in ("List", "Sequence", "LargeList"):
-        return (feature.get("feature") or {}).get("_type") == "Value"
+        return (feature.get("feature") or {}).get("_type") in ("Value", "ClassLabel")
     return False
 
 
@@ -187,4 +187,20 @@ def image_columns(dataset: str, config: str, split: str, token: str | None = Non
         return [f["name"] for f in r.json().get("features", [])
                 if (f.get("type") or {}).get("_type") == "Image"]
     except Exception:  # noqa: BLE001  no viewer: the caller asks for --image-column
+        return []
+
+
+def column_names(dataset: str, config: str, split: str, token: str | None = None) -> list[str]:
+    """Every column the viewer lists, in order; [] when the viewer has nothing."""
+    headers = {"authorization": f"Bearer {token}"} if token else {}
+    try:
+        r = httpx.get(
+            f"{DATASETS_SERVER}/first-rows",
+            params={"dataset": dataset, "config": config, "split": split},
+            headers=headers,
+            timeout=30,
+        )
+        r.raise_for_status()
+        return [f["name"] for f in r.json().get("features", [])]
+    except Exception:  # noqa: BLE001  no viewer: the columns cannot be checked before launch
         return []

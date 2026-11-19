@@ -30,6 +30,8 @@ DEFAULT_MAX_SEQ_LEN = 512
 # OCR: the models jobpipe's OCR script serves. Another model family needs its own
 # script (serving flags, prompt and page size differ per family).
 OCR_MODELS = ["lightonai/LightOnOCR-3-0.8B", "lightonai/LightOnOCR-3-4B"]
+EXTRACT_MODEL = "Qwen/Qwen3.5-4B"
+EXTRACT_MAX_CHARS = 20_000  # about 5k tokens: the prompt fits the recipe's 16,384-token context
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".jp2", ".bmp"}
 
 # File extension -> `datasets` builder, for bucket and local-directory inputs.
@@ -170,6 +172,8 @@ EMBED_KEYS = ("source", "config", "split", "column", "id_column", "model", "max_
               "prefix", "keep", "text_out", "local_digest")
 OCR_KEYS = ("source", "config", "split", "image_column", "id_column", "model", "mode",
             "local_digest")
+EXTRACT_KEYS = ("source", "config", "split", "prompt", "schema", "system", "id_column", "model",
+                "max_tokens", "max_chars", "keep", "local_digest")
 
 
 def fingerprint_of(values: dict, task: str = "embed", keys: tuple = EMBED_KEYS) -> dict:
@@ -229,14 +233,19 @@ def _require_dataset(source: str, token) -> None:
 
 
 def _output_and_scale(fill: _Fill, source, output, world, limit, flavor, timeout, owner,
-                      token) -> tuple[str, str]:
-    """Output (default: a private bucket named after source and model), Jobs, limits."""
+                      token, tag: str | None = None) -> tuple[str, str]:
+    """Output (default: a private bucket named after source and model, and `tag` when the
+    task has settings that would otherwise share one output), Jobs, limits."""
     if output:
         fill.put("output", output, "user")
     else:
         name = f"{_slug(_source_name(source))}-{_slug(fill.values['model'].split('/')[-1])}"
+        why = "private bucket; the name includes the model"
+        if tag:
+            name += f"-{tag}"
+            why += " and a hash of the task settings"
         fill.put("output", f"hf://buckets/{owner or _whoami(token)}/jobpipe-outputs/{name}",
-                 "default", "private bucket; the name includes the model")
+                 "default", why)
     output_arg, output_uri = _normalise_output(fill.values["output"])
     fill.put("world", world or 1, "user" if world else "default")
     if limit is not None:
@@ -254,7 +263,8 @@ def _script(fill: _Fill, task: str, recipe_url: str | None, upstream: str) -> st
         return recipe_url
     recipe = RECIPES[task]
     fill.put("recipe", f"scripts/{recipe.script}", "default",
-             f"jobpipe's copy of uv-scripts {upstream}")
+             "made from jobpipe's recipe template" if upstream.startswith("(")
+             else f"jobpipe's copy of uv-scripts {upstream}")
     return script_path(recipe)
 
 
@@ -528,6 +538,171 @@ def resolve_ocr(
         timeout=timeout,
         expected_items=expected,
         fingerprint=fingerprint_of(values, "ocr", OCR_KEYS),
+        provenance=fill.prov,
+        notes=fill.notes,
+        values=values,
+        uploads=fill.uploads,
+    )
+
+
+def _text_or_file(value: str) -> tuple[str, str | None]:
+    """A flag that takes text or a path to a file: (text, the path when it was a file)."""
+    path = pathlib.Path(value).expanduser()
+    if len(value) < 512 and "\n" not in value and path.is_file():
+        return path.read_text(), str(path)
+    return value, None
+
+
+def _prompt_fields(prompt: str) -> list[str]:
+    import string
+
+    try:
+        return list(dict.fromkeys(name for _, name, _, _ in string.Formatter().parse(prompt)
+                                  if name))
+    except ValueError as error:
+        raise ValueError(f"--prompt is not a valid template ({error}); "
+                         "write literal braces as {{ and }}") from None
+
+
+def _check_schema(text: str) -> str:
+    """The schema as compact JSON, after the checks the recipe makes (fail before launch)."""
+    try:
+        schema = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"--schema is not JSON: {error}") from None
+    if not isinstance(schema, dict) or schema.get("type") != "object" \
+            or not schema.get("properties"):
+        raise ValueError('--schema must be an object schema with properties, e.g. '
+                         '{"type": "object", "properties": {"label": {"enum": ["a", "b"]}}}')
+    taken = {"id", "error", "raw", "model", "finish_reason", "prompt_tokens",
+             "completion_tokens"}
+    clashes = sorted(taken & set(schema["properties"]))
+    if clashes:
+        raise ValueError(f"--schema properties {clashes} clash with the recipe's own columns")
+    return json.dumps(schema, separators=(",", ":"))
+
+
+def resolve_extract(
+    source: str,
+    *,
+    prompt: str,
+    schema: str | None = None,
+    system: str | None = None,
+    model: str | None = None,
+    id_column: str | None = None,
+    keep: list[str] | None = None,
+    max_tokens: int | None = None,
+    max_chars: int | None = None,
+    config: str | None = None,
+    split: str | None = None,
+    output: str | None = None,
+    world: int | None = None,
+    limit: int | None = None,
+    flavor: str | None = None,
+    timeout: str | None = None,
+    recipe_url: str | None = None,
+    owner: str | None = None,
+    token: str | None = None,
+) -> Plan:
+    """Plan an LLM run that fills `prompt` from each row ({column} placeholders) and, with
+    `schema` (JSON text or a .json path), gets back JSON whose top-level properties become
+    output columns. Input: a Hub dataset, a bucket glob, or a local folder of .txt/.md."""
+    _check_numbers(limit=limit, world=world, max_tokens=max_tokens, max_chars=max_chars)
+    fill = _Fill()
+    put, values = fill.put, fill.values
+
+    prompt_text, prompt_path = _text_or_file(prompt)
+    fields = _prompt_fields(prompt_text)
+    if not fields:
+        raise ValueError("--prompt has no {column} to fill in, e.g. 'Summarise: {text}'")
+    put("prompt", prompt_text, "user", f"from {prompt_path}" if prompt_path else None)
+    if schema is not None:
+        schema_text, schema_path = _text_or_file(schema)
+        put("schema", _check_schema(schema_text), "user",
+            f"from {schema_path}" if schema_path else None)
+    if system is not None:
+        put("system", system, "user")
+
+    source = _take_source(fill, source, token, FORMATS)
+    from_bucket = source.startswith("hf://buckets/")
+    if from_bucket:
+        suffix = pathlib.PurePosixPath(source).suffix.lower()
+        if suffix not in FORMATS:
+            raise ValueError(
+                f"a bucket input is a glob ending in one of {', '.join(sorted(FORMATS))}; "
+                f"got {source!r}"
+            )
+        if FORMATS[suffix] == "text":
+            put("id_column", "(file path)", "detected", "relative to the glob's fixed prefix")
+            if id_column:
+                raise ValueError("--id-column applies to table input; files use their path")
+            if keep:
+                raise ValueError("--keep needs a table input; files have no columns")
+        elif id_column:
+            put("id_column", id_column, "user")
+    else:
+        _require_dataset(source, token)
+        _hub_split(fill, source, config, split, token)
+        names = introspect.column_names(source, values["config"], values["split"], token=token)
+        missing = [name for name in fields if names and name not in names]
+        if missing:
+            raise ValueError(f"--prompt uses {missing}, not columns of {source!r} "
+                             f"(columns: {', '.join(names)})")
+        if id_column:
+            put("id_column", id_column, "user")
+        elif "id" in names:
+            put("id_column", "id", "detected", "column named 'id'; output rows join back on it")
+    put("fields", fields, "detected", "the {column} names in the prompt")
+
+    put("model", model or EXTRACT_MODEL, "user" if model else "default",
+        None if model else "4B instruct, thinking off; fits one A10G")
+    put("max_tokens", max_tokens or 1024, "user" if max_tokens else "default")
+    put("max_chars", max_chars or EXTRACT_MAX_CHARS, "user" if max_chars else "default",
+        None if max_chars else "each filled-in value is cut here, so the prompt fits")
+    if keep is not None:
+        put("keep", list(keep), "user")
+    elif not from_bucket:
+        skip = {*fields, values.get("id_column")}
+        small = [name for name in introspect.small_columns(
+            source, values["config"], values["split"], token=token) if name not in skip]
+        if small:
+            put("keep", small, "detected",
+                "every scalar column and list of scalars; --keep none to skip, or name them")
+
+    settings = json.dumps([values["prompt"], values.get("schema"), values.get("system")])
+    tag = hashlib.sha256(settings.encode()).hexdigest()[:6]
+    output_arg, output_uri = _output_and_scale(fill, source, output, world, limit, flavor,
+                                               timeout, owner, token, tag=tag)
+    location = _script(fill, "extract", recipe_url, "(recipe template)")
+    expected = _expected(source, from_bucket, fill, limit, token)
+
+    args = [source, output_arg, "--model", values["model"], "--prompt", values["prompt"],
+            "--max-tokens", str(values["max_tokens"]), "--max-chars", str(values["max_chars"]),
+            "--private"]
+    if "schema" in values:
+        args += ["--schema", values["schema"]]
+    if "system" in values:
+        args += ["--system", values["system"]]
+    if not from_bucket:
+        args += ["--config", values["config"], "--split", values["split"]]
+    if values.get("id_column") and values["id_column"] != "(file path)":
+        args += ["--id-column", values["id_column"]]
+    if values.get("keep"):
+        args += ["--keep", *values["keep"]]
+    if limit is not None:
+        args += ["--max-samples", str(limit)]
+
+    return Plan(
+        task="extract",
+        recipe_url=location,
+        script_name=None if recipe_url else "extract",
+        args=args,
+        world=values["world"],
+        output=output_uri,
+        flavor=flavor,
+        timeout=timeout,
+        expected_items=expected,
+        fingerprint=fingerprint_of(values, "extract", EXTRACT_KEYS),
         provenance=fill.prov,
         notes=fill.notes,
         values=values,

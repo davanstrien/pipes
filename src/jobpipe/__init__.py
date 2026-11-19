@@ -11,10 +11,10 @@ storage. It generates no code.
     run.status()
 """
 
-from jobpipe.api import Run, embed, ocr
+from jobpipe.api import Run, embed, extract, ocr
 from jobpipe.resolve import Plan
 
-__all__ = ["Plan", "Run", "embed", "ocr", "status"]
+__all__ = ["Plan", "Run", "embed", "extract", "ocr", "status"]
 
 
 def status(output_uri, **kwargs):

@@ -1,6 +1,6 @@
 line-length = 100
-# Copies of uv-scripts recipes: kept identical to their source, not linted here.
-extend-exclude = ["src/jobpipe/scripts"]
+# Recipe copies and the recipe template: single-file uv scripts, not linted here.
+extend-exclude = ["src/jobpipe/scripts", "src/jobpipe/templates"]
 
 [lint]
 select = ["E", "F", "I", "UP"]

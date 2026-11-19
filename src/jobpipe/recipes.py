@@ -36,6 +36,11 @@ RECIPES = {
         script="ocr.py",
         upstream="https://github.com/davanstrien/uv-scripts/blob/main/ocr/lighton-ocr3-saturate.py",
     ),
+    "extract": Recipe(
+        task="extract",
+        script="extract.py",
+        upstream="(none: made with `hf pipe new extract` from jobpipe's recipe template)",
+    ),
 }
 
 

@@ -4,11 +4,13 @@ Run a model over a whole dataset on [Hugging Face Jobs](https://huggingface.co/d
 
 ```
 hf pipe embed biglam/europeana_newspapers --keep language date --world 4
+hf pipe ocr 'hf://buckets/me/scans/**/*.jp2' --world 2
+hf pipe extract fancyzhx/ag_news --prompt 'What is this about? {text}' --schema schema.json
 ```
 
-`hf pipe` does not generate code. It runs a tested single-file recipe from
-[uv-scripts](https://huggingface.co/uv-scripts), pinned to a commit, and adds
-the parts a recipe alone does not have:
+`hf pipe` runs a tested single-file recipe (a copy of one from
+[uv-scripts](https://huggingface.co/uv-scripts), or one made from the recipe
+template with `hf pipe new`) and adds the parts a recipe alone does not have:
 
 - **Fills the blanks, with receipts.** Config, split, text column and id column
   are read from the dataset viewer. Every value is labelled with where it came
@@ -74,15 +76,18 @@ You need a token with Jobs access (`hf auth login`). Jobs bill by the minute.
 - [saturate](https://github.com/davanstrien/saturate): the batch client. It
   drives the vLLM server, sets how many requests are in flight, and writes
   resumable parquet with durable error rows.
-- [uv-scripts](https://huggingface.co/uv-scripts) recipes: the code that runs.
-  hf-pipe ships its own copy (`src/jobpipe/scripts/`), so the two repos change
-  independently. `embed` runs a copy of `embeddings/generate-embeddings-saturate.py`
-  (vLLM pooling, one text per request, float32 output, row ids and kept columns).
+- Recipes: the code that runs, in `src/jobpipe/scripts/`. `embed` and `ocr` are
+  copies of uv-scripts recipes, so the two repos change independently. `extract`
+  was made from `src/jobpipe/templates/recipe.py` (`hf pipe new NAME` prints it):
+  the template holds the plumbing every saturate recipe needs, and a new recipe
+  writes only its flags, request, reply and output columns.
 - `hf pipe`: resolve, launch, record, status.
 
 ## Known limits
 
 - Each Job reads the whole input and keeps its share of the rows. For a very
   large dataset with many Jobs, that repeats the download per Job.
-- Kept columns are written as strings (lists and dicts as JSON).
-- One task so far (`embed`). Another task is another recipe plus a resolver.
+- Kept columns keep their source types when the dataset declares them; otherwise
+  they are written as strings (lists and dicts as JSON).
+- Three tasks (`embed`, `ocr`, `extract`). Another task is a recipe (from the
+  template) plus a resolver in `resolve.py`.

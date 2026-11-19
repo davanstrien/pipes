@@ -66,6 +66,41 @@ def cmd_ocr(args) -> int:
     return _report(result, args)
 
 
+def cmd_extract(args) -> int:
+    from jobpipe.api import extract
+    from jobpipe.launcher import OutputMismatch
+    from jobpipe.recipes import RecipeTooOld
+
+    try:
+        result = extract(
+            args.source, prompt=args.prompt, schema=args.schema, system=args.system,
+            model=args.model, id_column=args.id_column,
+            keep=[] if args.keep == ["none"] else args.keep,
+            max_tokens=args.max_tokens, max_chars=args.max_chars, config=args.config,
+            split=args.split, output=args.output, world=args.world, limit=args.limit,
+            flavor=args.flavor, timeout=args.timeout, recipe_url=args.recipe_url,
+            launch=not args.dry_run, token=args.token, namespace=args.namespace,
+        )
+    except (ValueError, OutputMismatch, RecipeTooOld) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    return _report(result, args)
+
+
+def cmd_new(args) -> int:
+    """Print a new recipe made from the template (write it to NAME.py and edit its TASK part)."""
+    from jobpipe.new import render
+
+    try:
+        sys.stdout.write(render(args.name))
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    print(f"(edit the part between the TASK markers; run it with hf jobs uv run {args.name}.py "
+          "INPUT OUTPUT --max-samples 20)", file=sys.stderr)
+    return 0
+
+
 def _report(result, args) -> int:
     """Print a dry-run plan (commands) or a launched run, the same way for every verb."""
     from jobpipe.api import Run
@@ -219,6 +254,35 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--id-column", help="dataset input (default: 'id' if present)")
     _shared_options(p)
     p.set_defaults(fn=cmd_ocr)
+
+    p = sub.add_parser(
+        "extract",
+        help="ask an instruct model about every row, with an optional JSON schema for the reply",
+        description="SOURCE is a Hub dataset id, a bucket glob (.parquet .jsonl .csv, or "
+        ".txt/.md files: one row per file) or a local directory. --prompt has {column} "
+        "placeholders filled from each row. With --schema the server constrains each reply "
+        "to that JSON schema, and its top-level properties become output columns. Runs "
+        "jobpipe's extract.py, made from the recipe template.",
+    )
+    p.add_argument("source")
+    p.add_argument("--prompt", required=True,
+                   help="template text or a file, e.g. 'Classify this review: {text}'")
+    p.add_argument("--schema", help="JSON schema text or a .json file (an object schema)")
+    p.add_argument("--system", help="system message")
+    p.add_argument("--model", help="default: Qwen/Qwen3.5-4B (thinking off)")
+    p.add_argument("--id-column", help="dataset input (default: 'id' if present)")
+    p.add_argument("--keep", nargs="+", metavar="COLUMN",
+                   help="source columns to copy (default: every scalar column and list of "
+                   "scalars, except the prompt's; 'none' for no columns)")
+    p.add_argument("--max-tokens", type=int, help="longest reply (default 1024)")
+    p.add_argument("--max-chars", type=int,
+                   help="cut each filled-in value at this many characters (default 20000)")
+    _shared_options(p)
+    p.set_defaults(fn=cmd_extract)
+
+    p = sub.add_parser("new", help="print a new saturate recipe made from the template")
+    p.add_argument("name", help="recipe name, e.g. caption (lower case)")
+    p.set_defaults(fn=cmd_new)
 
     p = sub.add_parser("status", help="progress of a run, read from its output")
     p.add_argument("output", help="the run's output URI")

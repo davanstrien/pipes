@@ -17,7 +17,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 
-from jobpipe.resolve import Plan, resolve_embed, resolve_ocr
+from jobpipe.resolve import Plan, resolve_embed, resolve_extract, resolve_ocr
 
 
 @dataclass
@@ -78,6 +78,25 @@ def ocr(source: str, *, model: str | None = None, mode: str | None = None,
     folder of images (uploaded to a bucket at launch), or a Hub dataset with an image column."""
     plan = resolve_ocr(
         source, model=model, mode=mode, image_column=image_column, id_column=id_column,
+        config=config, split=split, output=output, world=world, limit=limit, flavor=flavor,
+        timeout=timeout, recipe_url=recipe_url, token=token,
+    )
+    return _finish(plan, launch=launch, token=token, namespace=namespace, verbose=verbose)
+
+
+def extract(source: str, *, prompt: str, schema: str | None = None, system: str | None = None,
+            model: str | None = None, id_column: str | None = None,
+            keep: list[str] | None = None, max_tokens: int | None = None,
+            max_chars: int | None = None, config: str | None = None, split: str | None = None,
+            output: str | None = None, world: int | None = None, limit: int | None = None,
+            flavor: str | None = None, timeout: str | None = None,
+            recipe_url: str | None = None, launch: bool = True, token: str | None = None,
+            namespace: str | None = None, verbose: bool = True) -> Run | Plan:
+    """Ask an instruct model about every row: `prompt` has {column} placeholders, and
+    `schema` (JSON text or a .json path) makes each reply JSON with those columns."""
+    plan = resolve_extract(
+        source, prompt=prompt, schema=schema, system=system, model=model,
+        id_column=id_column, keep=keep, max_tokens=max_tokens, max_chars=max_chars,
         config=config, split=split, output=output, world=world, limit=limit, flavor=flavor,
         timeout=timeout, recipe_url=recipe_url, token=token,
     )
