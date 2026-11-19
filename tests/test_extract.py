@@ -65,7 +65,7 @@ def test_request_and_reply_with_a_schema():
                        "--schema", json.dumps(SCHEMA), "--max-chars", "5")
     assert module.input_columns(args) == ["title", "text"]
     body = module.to_request(args, {"title": "A", "text": "abcdefgh"})
-    assert body["messages"][-1]["content"] == "Title: A\nabcde"
+    assert body["messages"][-1]["content"].startswith("Title: A\nabcde\n\nAnswer with JSON")
     assert body["chat_template_kwargs"] == {"enable_thinking": False}
     assert body["response_format"]["json_schema"]["schema"] == SCHEMA
 

@@ -66,6 +66,9 @@ def add_task_arguments(parser):
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--max-chars", type=int, default=None,
                         help="Cut each filled-in value at this many characters")
+    parser.add_argument("--schema-not-in-prompt", action="store_true",
+                        help="Do not add the schema to the prompt (it is added by default, so "
+                             "the model knows the allowed values)")
     parser.add_argument("--thinking", action="store_true",
                         help="Leave the model's thinking on (off by default: it uses the token budget)")
 
@@ -147,7 +150,14 @@ def to_request(args, row):
     for name in prompt_fields(args.prompt):
         value = "" if row.get(name) is None else str(row[name])
         values[name] = value[:args.max_chars] if args.max_chars else value
-    messages = [{"role": "user", "content": args.prompt.format_map(values)}]
+    content = args.prompt.format_map(values)
+    if args.schema_obj and not args.schema_not_in_prompt:
+        # The server only constrains the reply; without the schema in the prompt the model does
+        # not know the allowed values, and an enum answer it cannot write is forced onto
+        # whichever allowed value shares its first tokens ("Science" -> "Sports").
+        content += ("\n\nAnswer with JSON that matches this schema:\n"
+                    + json.dumps(args.schema_obj, ensure_ascii=False))
+    messages = [{"role": "user", "content": content}]
     if args.system:
         messages.insert(0, {"role": "system", "content": args.system})
     body = {"model": args.model, "messages": messages, "max_tokens": args.max_tokens,
